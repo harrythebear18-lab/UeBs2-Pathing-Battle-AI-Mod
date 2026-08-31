@@ -28,6 +28,7 @@ namespace UEBS2PathingMod
         private static float _brushWidth = 60f;
         private static float _brushDepth = 60f;
         private static float _brushStrength = 0.8f;
+        private static float _corridorWidth = 80f;
 
         // Manual blockers placed by the user. These persist until removed.
         private static readonly System.Collections.Generic.List<FlowFieldModulator.Blocker> _manualBlockers =
@@ -46,8 +47,10 @@ namespace UEBS2PathingMod
         private static bool _corridorFirstClick = true;
         private static Vector3 _corridorStart;
 
-        // HUD window position (small, corner of screen).
-        private static Rect _hud = new Rect(Screen.width - 260, 20, 240, 180);
+        // HUD window — auto-sized like the settings UI.
+        private static Rect _hud = new Rect(Screen.width - 320, 20, 300, 400);
+        private static Vector2 _hudScroll;
+        private static float _hudContentHeight = 400;
 
         /// <summary>
         /// Toggle paint mode. Called from ThreadManager.Update prefix.
@@ -60,6 +63,9 @@ namespace UEBS2PathingMod
                 // Entering paint mode — make sure cursor is visible for RTS clicking.
                 Cursor.visible = true;
                 Cursor.lockState = CursorLockMode.None;
+                // Reposition HUD to top-right on first open.
+                _hud.x = Screen.width - 320;
+                _hud.y = 20;
             }
             else
             {
@@ -177,7 +183,7 @@ namespace UEBS2PathingMod
             float pathLength = Vector3.Distance(from, to);
             Vector3 midpoint = (from + to) * 0.5f;
 
-            float corridorWidth = _brushWidth * 0.5f;
+            float corridorWidth = _corridorWidth;
 
             // Two walls parallel to the path, offset by corridorWidth.
             _manualBlockers.Add(new FlowFieldModulator.Blocker
@@ -232,73 +238,118 @@ namespace UEBS2PathingMod
 
         /// <summary>
         /// Draw the paint mode HUD. Called from ThreadManager.OnGUI postfix.
+        /// Uses GUILayout.Window with scroll view — same approach as the settings UI.
         /// </summary>
         internal static void DrawHUD()
         {
             if (!_active) return;
 
             EnsureStyles();
-            _hud = GUI.Window(9876544, _hud, DrawHUDWindow, "Paint Mode");
+            _hud = GUILayout.Window(9876544, _hud, DrawHUDWindow, "Paint Mode");
         }
 
-        private static GUIStyle _hudStyle;
+        private static GUIStyle _hudHeader;
         private static GUIStyle _hudSmall;
+        private static GUIStyle _hudBox;
         private static bool _hudStylesReady;
 
         private static void EnsureStyles()
         {
             if (_hudStylesReady) return;
-            _hudStyle = new GUIStyle(GUI.skin.label) { fontStyle = FontStyle.Bold, fontSize = 12 };
+            _hudHeader = new GUIStyle(GUI.skin.label) { fontStyle = FontStyle.Bold, fontSize = 13 };
             _hudSmall = new GUIStyle(GUI.skin.label) { fontSize = 10, richText = true };
+            _hudBox = new GUIStyle(GUI.skin.box);
             _hudStylesReady = true;
         }
 
         private static void DrawHUDWindow(int id)
         {
+            EnsureStyles();
+
+            // Scroll view with auto-sized content height (same pattern as settings UI).
+            var scrollRect = new Rect(4, 22, _hud.width - 8, _hud.height - 26);
+            _hudScroll = GUILayout.BeginScrollView(_hudScroll,
+                GUILayout.Width(scrollRect.width), GUILayout.Height(scrollRect.height));
+
             GUILayout.BeginVertical();
             {
-                GUILayout.Label("Flow Field Paint", _hudStyle);
+                GUILayout.Label("Flow Field Paint", _hudHeader);
 
-                // Tool selection.
-                GUILayout.Label("Tool (1/2/3):", _hudSmall);
+                GUILayout.Space(4);
+
+                // ---- Tool selection ----
+                GUILayout.Label("Tool (keys 1/2/3):", _hudSmall);
                 _tool = (PaintTool)GUILayout.SelectionGrid((int)_tool,
                     new string[] { "Block", "Corridor", "Clear" }, 3);
 
-                GUILayout.Space(4);
+                GUILayout.Space(6);
 
-                // Brush settings.
-                GUILayout.Label($"Brush size: {_brushWidth:F0}  (Shift+Scroll)", _hudSmall);
+                // ---- Brush settings ----
+                GUILayout.Label("Brush", _hudHeader);
+                GUILayout.Label($"  Size: {_brushWidth:F0}  (Shift+Scroll to adjust)", _hudSmall);
                 _brushWidth = GUILayout.HorizontalSlider(_brushWidth, 10f, 300f);
                 _brushDepth = _brushWidth;
 
-                GUILayout.Label($"Strength: {_brushStrength:F2}", _hudSmall);
+                GUILayout.Label($"  Strength: {_brushStrength:F2}  (0.1=soft, 1.0=hard wall)", _hudSmall);
                 _brushStrength = GUILayout.HorizontalSlider(_brushStrength, 0.1f, 1f);
 
-                GUILayout.Space(4);
+                GUILayout.Space(6);
 
-                // Status.
-                GUILayout.Label($"Blockers: {_manualBlockers.Count}", _hudSmall);
+                // ---- Corridor width ----
+                if (_tool == PaintTool.Corridor)
+                {
+                    GUILayout.Label($"  Corridor width: {_corridorWidth:F0}", _hudSmall);
+                    _corridorWidth = GUILayout.HorizontalSlider(_corridorWidth, 20f, 200f);
+                    GUILayout.Space(4);
+                }
+
+                // ---- Status ----
+                GUILayout.Label("Status", _hudHeader);
+                GUILayout.Label($"  Active blockers: {_manualBlockers.Count}", _hudSmall);
 
                 if (_tool == PaintTool.Corridor)
                 {
+                    GUILayout.Space(2);
                     if (_corridorFirstClick)
-                        GUILayout.Label("<color=yellow>Click first point...</color>", _hudSmall);
+                        GUILayout.Label("  <color=yellow>Click first point...</color>", _hudSmall);
                     else
-                        GUILayout.Label("<color=yellow>Click second point...</color>", _hudSmall);
+                        GUILayout.Label("  <color=yellow>Click second point...</color>", _hudSmall);
                 }
 
-                if (GUILayout.Button("Clear All"))
+                GUILayout.Space(6);
+
+                // ---- Actions ----
+                GUILayout.Label("Actions", _hudHeader);
+                if (GUILayout.Button("Clear All Blockers", GUILayout.Height(24)))
                 {
                     _manualBlockers.Clear();
                 }
 
                 GUILayout.Space(4);
-                GUILayout.Label("LMB: place | RMB: remove", _hudSmall);
-                GUILayout.Label("Numpad9: exit paint mode", _hudSmall);
+
+                // ---- Controls help ----
+                GUILayout.Label("Controls", _hudHeader);
+                GUILayout.Label("  LMB: place blocker / corridor point", _hudSmall);
+                GUILayout.Label("  RMB: remove nearest blocker / cancel corridor", _hudSmall);
+                GUILayout.Label("  Shift+Scroll: adjust brush size", _hudSmall);
+                GUILayout.Label("  1: Block tool  |  2: Corridor  |  3: Clear", _hudSmall);
+                GUILayout.Label("  Numpad9: exit paint mode", _hudSmall);
+
+                GUILayout.Space(6);
+                GUILayout.Label("Numpad+ for full settings window.", _hudSmall);
             }
             GUILayout.EndVertical();
 
-            GUI.DragWindow(new Rect(0, 0, 10000, 20));
+            // Capture content height for scroll sizing.
+            if (Event.current.type == EventType.Repaint)
+            {
+                _hudContentHeight = GUILayoutUtility.GetLastRect().height + 20f;
+            }
+
+            GUILayout.EndScrollView();
+
+            // Drag handle at the top.
+            GUI.DragWindow(new Rect(0, 0, 10000, 22));
         }
     }
 }
