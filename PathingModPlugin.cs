@@ -56,6 +56,14 @@ namespace UEBS2PathingMod
         internal ConfigEntry<bool> FlowFieldModulation;
         internal ConfigEntry<float> FlowFieldBlockStrength;
 
+        // Ollama / AI battle analyzer
+        internal ConfigEntry<bool> OllamaEnabled;
+        internal ConfigEntry<float> OllamaInterval;
+        internal ConfigEntry<string> OllamaModel;
+        internal ConfigEntry<bool> OllamaAutoApply;
+
+        internal BattleAnalyzer Analyzer;
+
         private Harmony _harmony;
 
         private void Awake()
@@ -124,6 +132,23 @@ namespace UEBS2PathingMod
             FlowFieldBlockStrength = Config.Bind("FlowField", "BlockStrength", 0.7f,
                 "Strength of soft obstacle walls (0=none, 1=hard wall). Lower = units may push through.");
 
+            // Ollama AI battle analyzer
+            OllamaEnabled = Config.Bind("Ollama", "Enabled", false,
+                "Enable AI battle analysis via local Ollama. Captures periodic screenshots and sends them to a Qwen vision model for tactical assessment.");
+            OllamaInterval = Config.Bind("Ollama", "Interval", 15f,
+                "Seconds between automatic battle analyses. Lower = more responsive but more LLM load.");
+            OllamaModel = Config.Bind("Ollama", "Model", "qwen2.5vl:7b",
+                "Ollama model name for vision analysis. Must support image input (e.g. qwen2.5vl:7b).");
+            OllamaAutoApply = Config.Bind("Ollama", "AutoApply", true,
+                "Automatically apply the AI's suggested parameter adjustments. If false, suggestions are displayed in the UI for manual review.");
+
+            // Initialize the battle analyzer component.
+            Analyzer = gameObject.AddComponent<BattleAnalyzer>();
+            Analyzer.Enabled = OllamaEnabled.Value;
+            Analyzer.Interval = OllamaInterval.Value;
+            Analyzer.ModelName = OllamaModel.Value;
+            Analyzer.AutoApply = OllamaAutoApply.Value;
+
             _harmony = new Harmony(Guid);
             _harmony.PatchAll(typeof(Patches));
             _harmony.PatchAll(typeof(PathingModUI));
@@ -138,6 +163,25 @@ namespace UEBS2PathingMod
         {
             _harmony?.UnpatchSelf();
             Instance = null;
+        }
+
+        private void Update()
+        {
+            // Sync Ollama config to the analyzer each frame (cheap).
+            if (Analyzer != null)
+            {
+                Analyzer.Enabled = OllamaEnabled.Value;
+                Analyzer.Interval = OllamaInterval.Value;
+                Analyzer.ModelName = OllamaModel.Value;
+                Analyzer.AutoApply = OllamaAutoApply.Value;
+            }
+
+            // Numpad8: trigger an immediate battle analysis (manual).
+            if (Input.GetKeyDown(KeyCode.Keypad8) && Analyzer != null)
+            {
+                Analyzer.AnalyzeNow();
+                Logger.LogInfo("[BattleAnalyzer] Manual analysis triggered.");
+            }
         }
 
         // ---- Dynamic scaling helpers ----

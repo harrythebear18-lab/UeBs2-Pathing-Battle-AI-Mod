@@ -697,6 +697,15 @@ namespace UEBS2PathingMod
                     // Fall back toward nearest friendly sub-group centroid.
                     dest = sg.NearestFriendlyCentroid;
                     avoidEnemies = true;
+
+                    // Retreat wavefield: wall off the forward path toward the enemy,
+                    // funnel units into a clean retreat corridor, and braid the
+                    // rear path so they mix backward instead of clumping.
+                    if (FlowFieldModulationEnabled && sg.NearestEnemyDist < float.MaxValue)
+                    {
+                        FlowFieldModulator.CreateRetreatWavefield(
+                            sg.Centroid, sg.NearestEnemyPos, dest, strength: 0.7f);
+                    }
                     break;
 
                 case FractureAction.Pursue:
@@ -751,6 +760,16 @@ namespace UEBS2PathingMod
                             dest = sg.Centroid + (awayFromEnemy * 0.7f + toFriendRout * 0.3f).normalized * 300f;
                         }
                         avoidEnemies = true;
+
+                        // Rout wavefield: stronger than retreat — hard forward wall
+                        // to prevent any forward drift, plus funnels to drive units
+                        // backward in panic. The braided rear corridor keeps the
+                        // rout from becoming a single-file stampede.
+                        if (FlowFieldModulationEnabled && sg.NearestEnemyDist < float.MaxValue)
+                        {
+                            FlowFieldModulator.CreateRetreatWavefield(
+                                sg.Centroid, sg.NearestEnemyPos, dest, strength: 0.9f);
+                        }
                     }
                     break;
 
@@ -758,6 +777,15 @@ namespace UEBS2PathingMod
                     // Rallied units reform at the nearest friendly sub-group.
                     dest = sg.NearestFriendlyCentroid;
                     avoidEnemies = true;
+
+                    // Light retreat wavefield — regrouping units are still shaky,
+                    // so keep a soft forward wall to prevent them from re-engaging
+                    // prematurely before they've reformed.
+                    if (FlowFieldModulationEnabled && sg.NearestEnemyDist < float.MaxValue)
+                    {
+                        FlowFieldModulator.CreateRetreatWavefield(
+                            sg.Centroid, sg.NearestEnemyPos, dest, strength: 0.4f);
+                    }
                     break;
 
                 case FractureAction.FlankFortification:

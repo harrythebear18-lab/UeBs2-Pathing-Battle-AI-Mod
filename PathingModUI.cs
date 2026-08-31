@@ -297,7 +297,59 @@ namespace UEBS2PathingMod
                 }
 
                 GUILayout.Space(6);
+
+                // ---- Ollama AI Battle Analyzer ----
+                GUILayout.Label("AI Battle Analyzer (Ollama)", _header);
+                i.OllamaEnabled.Value = GUILayout.Toggle(i.OllamaEnabled.Value,
+                    "  Enable periodic AI tactical analysis");
+                if (i.OllamaEnabled.Value)
+                {
+                    GUILayout.Label($"  Interval: {i.OllamaInterval.Value:F0}s  (seconds between auto-analyses)");
+                    i.OllamaInterval.Value = GUILayout.HorizontalSlider(i.OllamaInterval.Value, 5f, 60f);
+                    GUILayout.Label($"  Model: {i.OllamaModel.Value}");
+                    i.OllamaModel.Value = GUILayout.TextField(i.OllamaModel.Value);
+                    i.OllamaAutoApply.Value = GUILayout.Toggle(i.OllamaAutoApply.Value,
+                        "  Auto-apply suggested parameters");
+                    GUILayout.Label("  [Numpad8] Trigger analysis now", _small);
+
+                    if (i.Analyzer != null)
+                    {
+                        GUILayout.Space(2);
+                        if (i.Analyzer.IsAnalyzing)
+                            GUILayout.Label("  Status: <color=yellow>ANALYZING...</color>", _small);
+                        else if (!string.IsNullOrEmpty(i.Analyzer.LastError))
+                            GUILayout.Label($"  Status: <color=red>ERROR: {i.Analyzer.LastError}</color>", _small);
+                        else
+                            GUILayout.Label("  Status: <color=green>Ready</color>", _small);
+
+                        if (!string.IsNullOrEmpty(i.Analyzer.LastAssessment))
+                        {
+                            GUILayout.Space(2);
+                            GUILayout.Label("  Last Assessment:", _small);
+                            GUILayout.Label($"  \"{i.Analyzer.LastAssessment}\"", _small);
+
+                            if (i.Analyzer.SuggestedDispersion >= 0f)
+                            {
+                                GUILayout.Label($"  Suggested: dispersion={i.Analyzer.SuggestedDispersion:F2}  " +
+                                    $"block={i.Analyzer.SuggestedBlockStrength:F2}  " +
+                                    $"retreat={i.Analyzer.SuggestedRetreatThreshold:F2}  " +
+                                    $"rout={i.Analyzer.SuggestedRoutThreshold:F2}  " +
+                                    $"aggr={i.Analyzer.SuggestedAggression}", _small);
+                            }
+                            if (!i.OllamaAutoApply.Value && i.Analyzer.SuggestedDispersion >= 0f)
+                            {
+                                if (GUILayout.Button("  Apply Suggestions", GUILayout.Height(20)))
+                                {
+                                    i.Analyzer.ApplyParameters();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                GUILayout.Space(6);
                 GUILayout.Label("Numpad+ or Esc to close (releases mouse back to the game).", _small);
+                GUILayout.Label("Numpad8 = manual AI analysis  |  Numpad9 = paint mode", _small);
             }
             GUILayout.EndVertical();
 

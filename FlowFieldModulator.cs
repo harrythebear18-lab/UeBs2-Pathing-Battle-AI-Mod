@@ -262,6 +262,83 @@ namespace UEBS2PathingMod
         }
 
         /// <summary>
+        /// Create a retreat wavefield that drives units backward away from the enemy.
+        ///
+        /// This is the inverse of a blocker — instead of stopping movement, it
+        /// creates a "push" effect by:
+        ///   1. Walling off the forward path (between unit and enemy) so units
+        ///      can't drift back toward the enemy
+        ///   2. Creating a fan of soft obstacles BEHIND the unit on the sides,
+        ///      funneling them into a clean retreat corridor
+        ///   3. The NavGrid target (placed by SubGroupFracture) pulls them back
+        ///
+        /// Combined, this creates a wave that pushes units backward: the forward
+        /// path is blocked, the sides are walled, and the backward path is clear
+        /// with a pull target. Units have no choice but to retreat.
+        /// </summary>
+        /// <param name="unitPos">Current position of the retreating unit group</param>
+        /// <param name="enemyPos">Position of the nearest enemy threat</param>
+        /// <param name="retreatDest">Where we want them to go (behind friendly lines)</param>
+        /// <param name="strength">Obstacle strength (0=off, 1=hard wall)</param>
+        internal static void CreateRetreatWavefield(
+            Vector3 unitPos, Vector3 enemyPos, Vector3 retreatDest, float strength = 0.8f)
+        {
+            Vector3 awayFromEnemy = (unitPos - enemyPos).normalized;
+            awayFromEnemy.y = 0;
+            if (awayFromEnemy.sqrMagnitude < 0.01f) awayFromEnemy = Vector3.forward;
+
+            // Perpendicular to the retreat direction (across the front).
+            Vector3 right = new Vector3(-awayFromEnemy.z, 0, awayFromEnemy.x).normalized;
+
+            float distToEnemy = Vector3.Distance(unitPos, enemyPos);
+            float distToRetreat = Vector3.Distance(unitPos, retreatDest);
+
+            // 1. Forward wall — between the unit and the enemy.
+            //    Place it at 40% of the distance to the enemy, close enough
+            //    to block forward drift but not on top of the unit.
+            float wallDist = Mathf.Min(distToEnemy * 0.4f, 80f);
+            Vector3 forwardWallPos = unitPos - awayFromEnemy * wallDist;
+            // Wide wall to block the entire forward front.
+            float wallWidth = 120f;
+            AddBlocker(forwardWallPos, wallWidth, 20f, strength);
+
+            // 2. Side funnels — diagonal walls on both sides of the retreat path,
+            //    angled backward to funnel units into the retreat corridor.
+            //    These prevent units from scattering sideways during retreat.
+            if (distToRetreat > 30f)
+            {
+                float funnelSpacing = 60f;
+                float funnelLength = Mathf.Min(distToRetreat * 0.5f, 100f);
+
+                // Left funnel — diagonal wall from the unit's left side angling back.
+                Vector3 leftFunnelCenter = unitPos + right * funnelSpacing - awayFromEnemy * funnelLength * 0.3f;
+                AddBlocker(leftFunnelCenter, 15f, funnelLength, strength * 0.6f);
+
+                // Right funnel — mirror.
+                Vector3 rightFunnelCenter = unitPos - right * funnelSpacing - awayFromEnemy * funnelLength * 0.3f;
+                AddBlocker(rightFunnelCenter, 15f, funnelLength, strength * 0.6f);
+            }
+
+            // 3. Staggered rear blockers — a few soft obstacles behind the unit
+            //    on alternating sides, creating a braided retreat corridor that
+            //    keeps units moving backward in a mixed stream rather than a
+            //    rigid column. Same braiding concept as the advance, but reversed.
+            if (distToRetreat > 80f && strength > 0.3f)
+            {
+                int numZags = Mathf.Clamp(Mathf.RoundToInt(distToRetreat / 100f), 2, 5);
+                for (int z = 0; z < numZags; z++)
+                {
+                    float t = (float)(z + 1) / (numZags + 1);
+                    Vector3 along = unitPos + (retreatDest - unitPos) * t;
+                    bool blockRight = (z % 2 == 0);
+                    Vector3 blockOffset = (blockRight ? right : -right) * 30f;
+                    Vector3 blockCenter = along + blockOffset;
+                    AddBlocker(blockCenter, 50f, 10f, strength * 0.3f);
+                }
+            }
+        }
+
+        /// <summary>
         /// Block all direct approaches to a fortification except the assigned flank.
         /// This forces attacking units to route to their assigned flank point
         /// instead of beelining for the fort center.
