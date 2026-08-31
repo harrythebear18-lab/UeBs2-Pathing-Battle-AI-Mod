@@ -88,11 +88,14 @@
   </ItemGroup>
 
   <!--
-    After build, drop the DLL straight into the game's BepInEx plugins folder
-    so a rebuild is enough to test in-game.
+    After build, drop the DLLs straight into the game's BepInEx plugins folder
+    so a rebuild is enough to test in-game. System.ValueTuple.dll is required
+    because Unity 2018's Mono runtime doesn't ship it.
   -->
   <Target Name="DeployToPlugins" AfterTargets="Build">
     <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll"
+          DestinationFolder="$(GameDir)\BepInEx\plugins" />
+    <Copy SourceFiles="$(OutputPath)System.ValueTuple.dll"
           DestinationFolder="$(GameDir)\BepInEx\plugins" />
   </Target>
 
