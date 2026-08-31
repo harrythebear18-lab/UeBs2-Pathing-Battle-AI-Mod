@@ -42,6 +42,15 @@ namespace UEBS2PathingMod
         internal static float DispersionWidth = 200f;     // max lateral spread for multi-point targets
         internal static bool FlowFieldModulationEnabled = true;
 
+        // Cohesion / target reprioritization config.
+        internal static bool CohesionEnabled = true;       // enable smart target switching
+        internal static float CohesionScanRadius = 250f;   // radius to scan for enemy clusters
+        internal static float CohesionThreatRatio = 1.4f;  // high threat must be this x current to switch
+        internal static float CohesionSwitchCooldown = 8f; // min seconds between target switches
+        internal static float CohesionWeight = 1.0f;       // global multiplier for threat scores
+        internal static float RealignMomentumBoost = 0.1f; // momentum boost on target switch
+        internal static float RealignDispersionBoost = 0.15f; // extra dispersion during realign
+
         // ---- Runtime state ----
         private static float _timer;
         private static readonly List<SubGroup> _subGroups = new List<SubGroup>();
@@ -52,6 +61,8 @@ namespace UEBS2PathingMod
         private static readonly HashSet<int> _fracturingArmyIds = new HashSet<int>();
         // Armies that are routing/retreating — need WalkAttack suppressed too.
         private static readonly HashSet<int> _retreatingArmyIds = new HashSet<int>();
+        // Per sub-group: last time it switched targets (for cooldown).
+        private static readonly Dictionary<int, float> _lastSwitchTime = new Dictionary<int, float>();
         // Store original field values so we can restore them after the GPU dispatch.
         private static readonly Dictionary<int, bool> _originalHoldPos = new Dictionary<int, bool>();
         private static readonly Dictionary<int, bool> _originalWalkAttack = new Dictionary<int, bool>();
@@ -84,6 +95,15 @@ namespace UEBS2PathingMod
             public float Morale;        // 0..1, derived from situation
             public TerrainAnalysis.TerrainAssessment Terrain;
             public FractureAction CurrentAction = FractureAction.None;
+
+            // Cohesion / target reprioritization state.
+            public Vector3 HighThreatEnemy;        // position of the highest-threat enemy cluster
+            public int HighThreatRemaining;        // unit count of the highest-threat cluster
+            public float HighThreatDist;           // distance to highest-threat cluster
+            public float HighThreatScore;          // computed threat score (size/dist/momentum)
+            public Vector3 CurrentEngagementPos;   // the enemy we're actually fighting (if engaged)
+            public int CurrentEngagementRemaining; // size of the enemy we're fighting
+            public bool ShouldRealign;             // true if cohesion logic says switch targets
         }
 
         /// <summary>What a sub-group has decided to do this cycle.</summary>
@@ -99,6 +119,7 @@ namespace UEBS2PathingMod
             Rout,               // full panic retreat — morale has collapsed
             Regroup,            // rallying point for routed units to reform
             FlankFortification, // approach enemy fortification from a distributed side
+            Realign,            // switch target to a higher-threat enemy cluster (cohesion)
         }
 
         /// <summary>Called from the NavGrid.Update prefix each frame.</summary>
@@ -363,6 +384,15 @@ namespace UEBS2PathingMod
             sg.NearestEnemyPos = Vector3.zero;
             sg.EnemyKills = 0;
 
+            // Cohesion: also scan for the highest-threat enemy cluster.
+            sg.HighThreatEnemy = Vector3.zero;
+            sg.HighThreatRemaining = 0;
+            sg.HighThreatDist = float.MaxValue;
+            sg.HighThreatScore = 0f;
+            sg.CurrentEngagementPos = Vector3.zero;
+            sg.CurrentEngagementRemaining = 0;
+            sg.ShouldRealign = false;
+
             foreach (var other in _subGroups)
             {
                 if (other.Team == sg.Team) continue;
@@ -373,6 +403,118 @@ namespace UEBS2PathingMod
                     sg.NearestEnemyPos = other.Centroid;
                     sg.NearestEnemyRemaining = other.TotalRemaining;
                     sg.EnemyKills = other.OurKills;
+                }
+
+                // Cohesion scan: score this enemy cluster with a multi-factor threat model.
+                // threat = enemy.size * proximityFactor * flankFactor * momentumFactor * isolationFactor
+                //
+                // This finds the "real" enemy — not the nearest skirmisher, not the stray
+                // archer, not the bait unit. The highest-scoring cluster is the one that
+                // actually threatens front cohesion.
+                if (CohesionEnabled && d < CohesionScanRadius)
+                {
+                    // Base: raw size (bigger = more threatening).
+                    float size = other.TotalRemaining;
+
+                    // Proximity factor: 1.0 at close range, clamped to 0.2 at scan radius.
+                    float proximityFactor = Mathf.Clamp(1f / (d * 0.01f + 1f), 0.2f, 1f);
+
+                    // Flank factor: 1.0 front, 1.3 flank, 1.6 rear/encircling.
+                    float flankFactor = 1f;
+                    if (sg.NearestEnemyDist < float.MaxValue)
+                    {
+                        Vector3 ourFacing = (sg.NearestEnemyPos - sg.Centroid).normalized;
+                        Vector3 toThisEnemy = (other.Centroid - sg.Centroid).normalized;
+                        float angle = Vector3.Angle(ourFacing, toThisEnemy);
+                        if (angle > 120f) flankFactor = 1.6f;       // rear / encircling
+                        else if (angle > 60f) flankFactor = 1.3f;    // flank
+                    }
+
+                    // Momentum factor: 0.5 (exhausted) to 1.5 (surging).
+                    float momentumFactor = 1f;
+                    int otherIdx = _subGroups.IndexOf(other);
+                    var otherMom = BattleMomentum.GetState(otherIdx);
+                    if (otherMom != null)
+                    {
+                        // Map momentum 0..1 to factor 0.5..1.5.
+                        momentumFactor = Mathf.Lerp(0.5f, 1.5f, otherMom.Momentum);
+                    }
+
+                    // Isolation factor: 1.2 if part of a larger mass, 0.8 if isolated.
+                    float isolationFactor = 1f;
+                    float otherNearestFriendlyDist = float.MaxValue;
+                    foreach (var ally in _subGroups)
+                    {
+                        if (ally == other || ally.Team != other.Team) continue;
+                        float ad = Vector3.Distance(other.Centroid, ally.Centroid);
+                        if (ad < otherNearestFriendlyDist) otherNearestFriendlyDist = ad;
+                    }
+                    if (otherNearestFriendlyDist < 100f)
+                        isolationFactor = 1.2f; // well-supported — part of main mass
+                    else if (otherNearestFriendlyDist > 300f)
+                        isolationFactor = 0.8f; // isolated — less threatening
+
+                    float threatScore = size * proximityFactor * flankFactor
+                        * momentumFactor * isolationFactor * CohesionWeight;
+
+                    if (threatScore > sg.HighThreatScore)
+                    {
+                        sg.HighThreatScore = threatScore;
+                        sg.HighThreatEnemy = other.Centroid;
+                        sg.HighThreatRemaining = other.TotalRemaining;
+                        sg.HighThreatDist = d;
+                    }
+                }
+            }
+
+            // Track the current engagement (the nearest enemy if we're close enough).
+            float currentThreatScore = 0f;
+            if (sg.NearestEnemyDist < 120f)
+            {
+                sg.CurrentEngagementPos = sg.NearestEnemyPos;
+                sg.CurrentEngagementRemaining = sg.NearestEnemyRemaining;
+                // Compute threat score for current engagement (same formula, simpler).
+                currentThreatScore = sg.NearestEnemyRemaining
+                    * Mathf.Lerp(1f, 0.3f, sg.NearestEnemyDist / CohesionScanRadius);
+            }
+
+            // Cohesion evaluation: should we switch from the current target
+            // to the highest-threat cluster?
+            // Condition: HighThreatScore > CurrentThreatScore * 1.4
+            //            AND morale is stable AND momentum is neutral/positive
+            //            AND not already on the biggest threat
+            //            AND cooldown has elapsed
+            if (CohesionEnabled && sg.HighThreatScore > 0 && currentThreatScore > 0)
+            {
+                bool alreadyOnBiggest = Vector3.Distance(sg.CurrentEngagementPos, sg.HighThreatEnemy) < 50f;
+                bool inSurvivalCrisis = sg.Morale < RetreatThreshold;
+
+                // Momentum must be neutral or positive (don't switch while exhausted).
+                int sgIdx = _subGroups.IndexOf(sg);
+                var momState = BattleMomentum.GetState(sgIdx);
+                bool momentumOk = momState == null
+                    || momState.Momentum > BattleMomentum.ConsolidateThreshold * 2f; // not in deep trough
+
+                // Morale must be stable (don't switch while panicking).
+                bool moraleStable = sg.Morale > RetreatThreshold;
+
+                // Cooldown check.
+                int sgHash = sg.GetHashCode();
+                float lastSwitch = _lastSwitchTime.ContainsKey(sgHash) ? _lastSwitchTime[sgHash] : -999f;
+                bool cooldownReady = (Time.time - lastSwitch) >= CohesionSwitchCooldown;
+
+                // The key condition: high threat must be 1.4x more threatening than current.
+                bool threatSignificantlyHigher = sg.HighThreatScore > currentThreatScore * CohesionThreatRatio;
+
+                if (threatSignificantlyHigher
+                    && !alreadyOnBiggest
+                    && !inSurvivalCrisis
+                    && moraleStable
+                    && momentumOk
+                    && cooldownReady
+                    && sg.HighThreatDist < CohesionScanRadius)
+                {
+                    sg.ShouldRealign = true;
                 }
             }
 
@@ -605,6 +747,23 @@ namespace UEBS2PathingMod
             {
                 if (sg.Terrain.NearbyHighGround != sg.Centroid)
                     action = FractureAction.SeekHighGround;
+            }
+
+            // ---- COHESION LAYER (target reprioritization) ----
+            // "Don't get peeled off." If cohesion logic flagged a realignment,
+            // break the current micro-engagement and reposition toward the
+            // highest-threat enemy cluster. This prevents sub-groups from
+            // getting baited into duels with small irrelevant enemies while
+            // the main threat rolls through the front line.
+            //
+            // Priority: above Reinforce/SeekHighGround (cohesion > opportunistic
+            // support), below Retreat/Rout (survival overrides cohesion).
+            // Also: don't realign if we're winning (don't abandon a winning fight).
+            else if (CohesionEnabled && sg.ShouldRealign && !sg.IsWinning)
+            {
+                action = FractureAction.Realign;
+                // Record the switch time for cooldown.
+                _lastSwitchTime[sg.GetHashCode()] = Time.time;
             }
 
             // ---- SUPPORT LAYER ----
@@ -871,6 +1030,57 @@ namespace UEBS2PathingMod
                     }
                     break;
 
+                case FractureAction.Realign:
+                    // "Don't get peeled off." Switch target from the current small
+                    // engagement to the highest-threat enemy cluster. Flow field
+                    // modulation makes the switch physical:
+                    //   1. Block the old target — soft wall between us and the
+                    //      small enemy we're disengaging from (prevents sticky duels)
+                    //   2. Corridor to the new target — two parallel walls funnel
+                    //      units toward the high-threat cluster
+                    //   3. Widen formation — extra dispersion for the approach
+                    //   4. Momentum boost — small bump to commit to the switch
+                    dest = sg.HighThreatEnemy;
+                    avoidEnemies = false; // attack-move toward the new threat
+
+                    if (FlowFieldModulationEnabled)
+                    {
+                        // 1. Block the old target — prevent units from drifting back
+                        //    into the small duel we're trying to leave.
+                        if (sg.CurrentEngagementRemaining > 0)
+                        {
+                            FlowFieldModulator.BlockDirectPath(
+                                sg.Centroid, sg.CurrentEngagementPos,
+                                wallWidth: 100f, strength: 0.6f);
+                        }
+
+                        // 2. Open a corridor toward the new target — funnel units
+                        //    from current position to the high-threat cluster.
+                        FlowFieldModulator.CreateCorridor(
+                            sg.Centroid, sg.HighThreatEnemy,
+                            corridorWidth: 80f, strength: 0.5f);
+                    }
+
+                    // 3. Widen formation — temporarily boost dispersion so the
+                    //    realigning group approaches the new threat with a broad front.
+                    //    (Applied via the dispersion system in the target issuance below
+                    //    by temporarily increasing DispersionFactor.)
+                    // The boost is applied in the dispersion section below via
+                    // a local override.
+
+                    // 4. Momentum boost — help the group commit to the switch.
+                    if (BattleMomentum.Enabled)
+                    {
+                        int momIdx = sgIndex; // sub-group index matches momentum state index
+                        var momState = BattleMomentum.GetState(momIdx);
+                        if (momState != null)
+                        {
+                            momState.Momentum = Mathf.Clamp01(
+                                momState.Momentum + RealignMomentumBoost);
+                        }
+                    }
+                    break;
+
                 default:
                     return;
             }
@@ -895,6 +1105,15 @@ namespace UEBS2PathingMod
             //    into a broad front instead of parallel channels.
 
             float dispersion = DispersionFactor;
+
+            // Realign dispersion boost: temporarily widen the formation when
+            // switching targets, so the group approaches the new threat with
+            // a broad front instead of a narrow column.
+            if (action == FractureAction.Realign)
+            {
+                dispersion = Mathf.Clamp01(dispersion + RealignDispersionBoost);
+            }
+
             int baseFormation = Mathf.Max(1, (int)Mathf.Sqrt(sg.TotalRemaining * 0.5f));
 
             if (dispersion <= 0f)

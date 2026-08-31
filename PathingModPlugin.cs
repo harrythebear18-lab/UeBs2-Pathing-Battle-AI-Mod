@@ -64,6 +64,14 @@ namespace UEBS2PathingMod
         internal ConfigEntry<float> MomentumConsolidateThreshold;
         internal ConfigEntry<bool> MomentumWavePooling;
 
+        // Cohesion / target reprioritization
+        internal ConfigEntry<bool> CohesionEnabled;
+        internal ConfigEntry<float> CohesionScanRadius;
+        internal ConfigEntry<float> CohesionThreatRatio;
+        internal ConfigEntry<float> CohesionWeight;
+        internal ConfigEntry<float> RealignMomentumBoost;
+        internal ConfigEntry<float> RealignDispersionBoost;
+
         // Ollama / AI battle agent (two-stage: vision + coder)
         internal ConfigEntry<bool> OllamaEnabled;
         internal ConfigEntry<float> OllamaInterval;
@@ -154,6 +162,20 @@ namespace UEBS2PathingMod
                 "Momentum level below which engaged groups enter CONSOLIDATE (tactical pause). Higher = groups pause sooner.");
             MomentumWavePooling = Config.Bind("Momentum", "WavePooling", true,
                 "Pool NavGrid target slots by wave phase. SURGE/READY groups get priority; CONSOLIDATE/RECOVERING groups yield slots. Creates pulsing GPU budget allocation.");
+
+            // Cohesion / target reprioritization
+            CohesionEnabled = Config.Bind("Cohesion", "Enabled", true,
+                "Enable unit cohesion logic. Sub-groups scan for the highest-threat enemy cluster and realign to maintain front integrity. Prevents getting baited into small duels.");
+            CohesionScanRadius = Config.Bind("Cohesion", "ScanRadius", 250f,
+                "Radius (world units) to scan for enemy clusters when computing threat scores. Larger = more strategic awareness, smaller = more reactive.");
+            CohesionThreatRatio = Config.Bind("Cohesion", "ThreatRatio", 1.4f,
+                "High-threat score must exceed current target score by this factor to trigger realignment. Higher = stickier fronts, lower = more fluid switching.");
+            CohesionWeight = Config.Bind("Cohesion", "Weight", 1.0f,
+                "Global multiplier for threat scores. Higher = more aggressive target switching.");
+            RealignMomentumBoost = Config.Bind("Cohesion", "RealignMomentumBoost", 0.1f,
+                "Momentum boost applied when a sub-group realigns to a new target. Helps the group commit to the switch.");
+            RealignDispersionBoost = Config.Bind("Cohesion", "RealignDispersionBoost", 0.15f,
+                "Extra dispersion applied during realignment. Widens the formation for the approach to the new threat.");
 
             // Ollama AI battle agent (two-stage: Qwen VL eyes + Qwen Coder actor)
             OllamaEnabled = Config.Bind("Ollama", "Enabled", false,
@@ -349,6 +371,14 @@ namespace UEBS2PathingMod
                 BattleMomentum.SurgeThreshold = i.MomentumSurgeThreshold.Value;
                 BattleMomentum.ConsolidateThreshold = i.MomentumConsolidateThreshold.Value;
                 BattleMomentum.WavePoolingEnabled = i.MomentumWavePooling.Value;
+
+                // Cohesion / target reprioritization config sync.
+                SubGroupFracture.CohesionEnabled = i.CohesionEnabled.Value;
+                SubGroupFracture.CohesionScanRadius = i.CohesionScanRadius.Value;
+                SubGroupFracture.CohesionThreatRatio = i.CohesionThreatRatio.Value;
+                SubGroupFracture.CohesionWeight = i.CohesionWeight.Value;
+                SubGroupFracture.RealignMomentumBoost = i.RealignMomentumBoost.Value;
+                SubGroupFracture.RealignDispersionBoost = i.RealignDispersionBoost.Value;
 
                 if (i.FractureEnabled.Value)
                 {

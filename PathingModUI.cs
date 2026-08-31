@@ -252,6 +252,23 @@ namespace UEBS2PathingMod
                         "  Wave-based target pooling (fresh groups get GPU priority)");
                 }
 
+                // ---- Cohesion / Target Reprioritization ----
+                GUILayout.Space(4);
+                GUILayout.Label("Unit Cohesion (Target Reprioritization)", _header);
+                i.CohesionEnabled.Value = GUILayout.Toggle(i.CohesionEnabled.Value,
+                    "  Enable cohesion logic (don't get peeled off)");
+                if (i.CohesionEnabled.Value)
+                {
+                    GUILayout.Label($"  Scan radius: {i.CohesionScanRadius.Value:F0}  (threat scanning distance)");
+                    i.CohesionScanRadius.Value = GUILayout.HorizontalSlider(i.CohesionScanRadius.Value, 100f, 500f);
+                    GUILayout.Label($"  Threat switch sensitivity: {i.CohesionThreatRatio.Value:F1}x  (higher = stickier fronts)");
+                    i.CohesionThreatRatio.Value = GUILayout.HorizontalSlider(i.CohesionThreatRatio.Value, 1.1f, 3.0f);
+                    GUILayout.Label($"  Realign momentum boost: {i.RealignMomentumBoost.Value:F2}  (commit to switch)");
+                    i.RealignMomentumBoost.Value = GUILayout.HorizontalSlider(i.RealignMomentumBoost.Value, 0f, 0.3f);
+                    GUILayout.Label($"  Realign dispersion boost: {i.RealignDispersionBoost.Value:F2}  (widen on switch)");
+                    i.RealignDispersionBoost.Value = GUILayout.HorizontalSlider(i.RealignDispersionBoost.Value, 0f, 0.4f);
+                }
+
                 GUILayout.Space(6);
                 GUILayout.Label("UI", _header);
                 i.ShowDebugStats.Value = GUILayout.Toggle(i.ShowDebugStats.Value, "  Show debug stats");
