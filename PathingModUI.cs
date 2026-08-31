@@ -298,50 +298,81 @@ namespace UEBS2PathingMod
 
                 GUILayout.Space(6);
 
-                // ---- Ollama AI Battle Analyzer ----
-                GUILayout.Label("AI Battle Analyzer (Ollama)", _header);
+                // ---- Ollama AI Battle Agent (Eyes + Actor) ----
+                GUILayout.Label("AI Battle Agent (Ollama)", _header);
                 i.OllamaEnabled.Value = GUILayout.Toggle(i.OllamaEnabled.Value,
-                    "  Enable periodic AI tactical analysis");
+                    "  Enable two-stage AI agent (VL eyes + Coder actor)");
                 if (i.OllamaEnabled.Value)
                 {
-                    GUILayout.Label($"  Interval: {i.OllamaInterval.Value:F0}s  (seconds between auto-analyses)");
+                    GUILayout.Label($"  Interval: {i.OllamaInterval.Value:F0}s  (auto-analysis cycle)");
                     i.OllamaInterval.Value = GUILayout.HorizontalSlider(i.OllamaInterval.Value, 5f, 60f);
-                    GUILayout.Label($"  Model: {i.OllamaModel.Value}");
-                    i.OllamaModel.Value = GUILayout.TextField(i.OllamaModel.Value);
+                    GUILayout.Label($"  Vision model (eyes): {i.OllamaVisionModel.Value}");
+                    i.OllamaVisionModel.Value = GUILayout.TextField(i.OllamaVisionModel.Value);
+                    GUILayout.Label($"  Coder model (actor): {i.OllamaCoderModel.Value}");
+                    i.OllamaCoderModel.Value = GUILayout.TextField(i.OllamaCoderModel.Value);
                     i.OllamaAutoApply.Value = GUILayout.Toggle(i.OllamaAutoApply.Value,
-                        "  Auto-apply suggested parameters");
+                        "  Auto-execute commands (no approval needed)");
                     GUILayout.Label("  [Numpad8] Trigger analysis now", _small);
 
-                    if (i.Analyzer != null)
+                    if (i.Agent != null)
                     {
-                        GUILayout.Space(2);
-                        if (i.Analyzer.IsAnalyzing)
-                            GUILayout.Label("  Status: <color=yellow>ANALYZING...</color>", _small);
-                        else if (!string.IsNullOrEmpty(i.Analyzer.LastError))
-                            GUILayout.Label($"  Status: <color=red>ERROR: {i.Analyzer.LastError}</color>", _small);
-                        else
-                            GUILayout.Label("  Status: <color=green>Ready</color>", _small);
+                        GUILayout.Space(3);
 
-                        if (!string.IsNullOrEmpty(i.Analyzer.LastAssessment))
+                        // Agent state indicator.
+                        string stateColor = "green";
+                        string stateText = i.Agent.State.ToString();
+                        if (i.Agent.State == BattleAgent.AgentState.Capturing
+                            || i.Agent.State == BattleAgent.AgentState.VisionAnalyzing
+                            || i.Agent.State == BattleAgent.AgentState.CoderAnalyzing)
+                            stateColor = "yellow";
+                        else if (i.Agent.State == BattleAgent.AgentState.AwaitingApproval)
+                            stateColor = "cyan";
+                        if (!string.IsNullOrEmpty(i.Agent.LastError))
+                            stateColor = "red";
+
+                        GUILayout.Label($"  State: <color={stateColor}>{stateText}</color>", _small);
+                        if (!string.IsNullOrEmpty(i.Agent.LastError))
+                            GUILayout.Label($"  Error: <color=red>{i.Agent.LastError}</color>", _small);
+
+                        // Vision assessment.
+                        if (!string.IsNullOrEmpty(i.Agent.LastVisionAssessment)
+                            && i.Agent.LastVisionAssessment != "(no analysis yet)")
                         {
                             GUILayout.Space(2);
-                            GUILayout.Label("  Last Assessment:", _small);
-                            GUILayout.Label($"  \"{i.Analyzer.LastAssessment}\"", _small);
+                            GUILayout.Label("  Vision (eyes):", _small);
+                            string vision = i.Agent.LastVisionAssessment;
+                            if (vision.Length > 200) vision = vision.Substring(0, 200) + "...";
+                            GUILayout.Label($"  \"{vision}\"", _small);
+                        }
 
-                            if (i.Analyzer.SuggestedDispersion >= 0f)
+                        // Coder reasoning + proposed commands.
+                        if (i.Agent.State == BattleAgent.AgentState.AwaitingApproval
+                            && i.Agent.PendingCommands.Count > 0)
+                        {
+                            GUILayout.Space(3);
+                            GUILayout.Label($"  <color=cyan>PROPOSED COMMANDS ({i.Agent.PendingCommands.Count}):</color>", _small);
+                            GUILayout.Label($"  Reasoning: {i.Agent.LastCoderReasoning}", _small);
+
+                            for (int c = 0; c < i.Agent.PendingCommands.Count; c++)
                             {
-                                GUILayout.Label($"  Suggested: dispersion={i.Analyzer.SuggestedDispersion:F2}  " +
-                                    $"block={i.Analyzer.SuggestedBlockStrength:F2}  " +
-                                    $"retreat={i.Analyzer.SuggestedRetreatThreshold:F2}  " +
-                                    $"rout={i.Analyzer.SuggestedRoutThreshold:F2}  " +
-                                    $"aggr={i.Analyzer.SuggestedAggression}", _small);
+                                var cmd = i.Agent.PendingCommands[c];
+                                string desc = DescribeCommand(cmd);
+                                GUILayout.Label($"    [{c+1}] {desc}", _small);
                             }
-                            if (!i.OllamaAutoApply.Value && i.Analyzer.SuggestedDispersion >= 0f)
+
+                            if (!i.OllamaAutoApply.Value)
                             {
-                                if (GUILayout.Button("  Apply Suggestions", GUILayout.Height(20)))
+                                GUILayout.Space(3);
+                                GUILayout.BeginHorizontal();
+                                if (GUILayout.Button("  APPROVE", GUILayout.Height(24), GUILayout.Width(120)))
                                 {
-                                    i.Analyzer.ApplyParameters();
+                                    i.Agent.ApproveCommands();
                                 }
+                                if (GUILayout.Button("  REJECT", GUILayout.Height(24), GUILayout.Width(120)))
+                                {
+                                    i.Agent.RejectCommands();
+                                }
+                                GUILayout.EndHorizontal();
                             }
                         }
                     }
@@ -363,6 +394,26 @@ namespace UEBS2PathingMod
 
             // Drag handle at the top of the window.
             GUI.DragWindow(new Rect(0, 0, 10000, 22));
+        }
+
+        /// <summary>Human-readable description of a proposed flow field command.</summary>
+        private static string DescribeCommand(BattleAgent.FlowFieldCommand cmd)
+        {
+            switch (cmd.Action)
+            {
+                case "block_path":
+                    return $"BLOCK PATH {cmd.From} -> {cmd.To} (w={cmd.Width:F0} s={cmd.Strength:F2})";
+                case "corridor":
+                    return $"CORRIDOR {cmd.From} -> {cmd.To} (w={cmd.Width:F0} s={cmd.Strength:F2})";
+                case "retreat_wave":
+                    return $"RETREAT WAVE from {cmd.UnitPos} away from {cmd.EnemyPos} (s={cmd.Strength:F2})";
+                case "set_param":
+                    if (cmd.Param == "aggression")
+                        return $"SET {cmd.Param} = {cmd.ParamBool}";
+                    return $"SET {cmd.Param} = {cmd.ParamValue:F2}";
+                default:
+                    return $"UNKNOWN: {cmd.Action}";
+            }
         }
     }
 }

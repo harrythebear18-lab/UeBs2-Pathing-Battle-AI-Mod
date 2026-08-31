@@ -56,13 +56,14 @@ namespace UEBS2PathingMod
         internal ConfigEntry<bool> FlowFieldModulation;
         internal ConfigEntry<float> FlowFieldBlockStrength;
 
-        // Ollama / AI battle analyzer
+        // Ollama / AI battle agent (two-stage: vision + coder)
         internal ConfigEntry<bool> OllamaEnabled;
         internal ConfigEntry<float> OllamaInterval;
-        internal ConfigEntry<string> OllamaModel;
+        internal ConfigEntry<string> OllamaVisionModel;
+        internal ConfigEntry<string> OllamaCoderModel;
         internal ConfigEntry<bool> OllamaAutoApply;
 
-        internal BattleAnalyzer Analyzer;
+        internal BattleAgent Agent;
 
         private Harmony _harmony;
 
@@ -132,22 +133,24 @@ namespace UEBS2PathingMod
             FlowFieldBlockStrength = Config.Bind("FlowField", "BlockStrength", 0.7f,
                 "Strength of soft obstacle walls (0=none, 1=hard wall). Lower = units may push through.");
 
-            // Ollama AI battle analyzer
+            // Ollama AI battle agent (two-stage: Qwen VL eyes + Qwen Coder actor)
             OllamaEnabled = Config.Bind("Ollama", "Enabled", false,
-                "Enable AI battle analysis via local Ollama. Captures periodic screenshots and sends them to a Qwen vision model for tactical assessment.");
+                "Enable AI battle agent via local Ollama. Qwen VL analyzes screenshots, Qwen Coder proposes flow field commands for approval.");
             OllamaInterval = Config.Bind("Ollama", "Interval", 15f,
-                "Seconds between automatic battle analyses. Lower = more responsive but more LLM load.");
-            OllamaModel = Config.Bind("Ollama", "Model", "qwen2.5vl:7b",
-                "Ollama model name for vision analysis. Must support image input (e.g. qwen2.5vl:7b).");
-            OllamaAutoApply = Config.Bind("Ollama", "AutoApply", true,
-                "Automatically apply the AI's suggested parameter adjustments. If false, suggestions are displayed in the UI for manual review.");
+                "Seconds between automatic analysis cycles. Lower = more responsive but more LLM load.");
+            OllamaVisionModel = Config.Bind("Ollama", "VisionModel", "qwen2.5vl:7b",
+                "Ollama model for vision analysis (the 'eyes'). Must support image input.");
+            OllamaCoderModel = Config.Bind("Ollama", "CoderModel", "qwen2.5-coder:7b",
+                "Ollama model for command generation (the 'engineer/actor'). Receives vision assessment + battle state, proposes flow field commands.");
+            OllamaAutoApply = Config.Bind("Ollama", "AutoApply", false,
+                "Automatically execute proposed commands without approval. DANGEROUS — leave false for propose+approve workflow.");
 
-            // Initialize the battle analyzer component.
-            Analyzer = gameObject.AddComponent<BattleAnalyzer>();
-            Analyzer.Enabled = OllamaEnabled.Value;
-            Analyzer.Interval = OllamaInterval.Value;
-            Analyzer.ModelName = OllamaModel.Value;
-            Analyzer.AutoApply = OllamaAutoApply.Value;
+            // Initialize the battle agent component.
+            Agent = gameObject.AddComponent<BattleAgent>();
+            Agent.Enabled = OllamaEnabled.Value;
+            Agent.Interval = OllamaInterval.Value;
+            Agent.VisionModel = OllamaVisionModel.Value;
+            Agent.CoderModel = OllamaCoderModel.Value;
 
             _harmony = new Harmony(Guid);
             _harmony.PatchAll(typeof(Patches));
@@ -167,20 +170,26 @@ namespace UEBS2PathingMod
 
         private void Update()
         {
-            // Sync Ollama config to the analyzer each frame (cheap).
-            if (Analyzer != null)
+            // Sync Ollama config to the agent each frame (cheap).
+            if (Agent != null)
             {
-                Analyzer.Enabled = OllamaEnabled.Value;
-                Analyzer.Interval = OllamaInterval.Value;
-                Analyzer.ModelName = OllamaModel.Value;
-                Analyzer.AutoApply = OllamaAutoApply.Value;
+                Agent.Enabled = OllamaEnabled.Value;
+                Agent.Interval = OllamaInterval.Value;
+                Agent.VisionModel = OllamaVisionModel.Value;
+                Agent.CoderModel = OllamaCoderModel.Value;
+
+                // Auto-apply: if enabled and commands are awaiting approval, execute them.
+                if (OllamaAutoApply.Value && Agent.State == BattleAgent.AgentState.AwaitingApproval)
+                {
+                    Agent.ApproveCommands();
+                }
             }
 
-            // Numpad8: trigger an immediate battle analysis (manual).
-            if (Input.GetKeyDown(KeyCode.Keypad8) && Analyzer != null)
+            // Numpad8: trigger an immediate analysis cycle (manual).
+            if (Input.GetKeyDown(KeyCode.Keypad8) && Agent != null)
             {
-                Analyzer.AnalyzeNow();
-                Logger.LogInfo("[BattleAnalyzer] Manual analysis triggered.");
+                Agent.AnalyzeNow();
+                Logger.LogInfo("[BattleAgent] Manual analysis triggered.");
             }
         }
 
