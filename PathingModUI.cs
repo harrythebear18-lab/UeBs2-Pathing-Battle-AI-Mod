@@ -15,7 +15,7 @@ namespace UEBS2PathingMod
 
         private static bool _visible;
         private static bool _wasVisible;          // edge-detect for cursor restore
-        private static Rect _window = new Rect(20, 20, 420, 600);
+        private static Rect _window = new Rect(20, 20, 440, 620);
         private static GUIStyle _header;
         private static GUIStyle _small;
         private static bool _stylesReady;
@@ -97,10 +97,10 @@ namespace UEBS2PathingMod
             Cursor.visible = true;
 
             EnsureStyles();
-            // Use GUILayout.Window with explicit min size so the window is
-            // large enough to read. The scroll view inside handles overflow.
-            _window = GUILayout.Window(9876543, _window, DrawWindow, "UEBS2 Pathing & Team AI",
-                GUILayout.MinWidth(400), GUILayout.MinHeight(500));
+            // Use GUI.Window (fixed rect) instead of GUILayout.Window.
+            // GUILayout.Window + scroll view fights for layout control and
+            // collapses to a tiny size. Fixed rect gives us reliable dimensions.
+            _window = GUI.Window(9876543, _window, DrawWindow, "UEBS2 Pathing & Team AI");
         }
 
         private static void EnsureStyles()
@@ -112,6 +112,7 @@ namespace UEBS2PathingMod
         }
 
         private static Vector2 _scroll;
+        private static float _contentHeight = 1000; // updated each frame by GUILayout
 
         private static void DrawWindow(int id)
         {
@@ -123,9 +124,11 @@ namespace UEBS2PathingMod
                 return;
             }
 
-            // Scrollable area — always expand to fill the window.
-            _scroll = GUILayout.BeginScrollView(_scroll,
-                GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
+            // Fixed-size scroll view inside the window rect.
+            // Leave 20px at top for the title bar drag handle.
+            Rect scrollArea = new Rect(10, 25, _window.width - 20, _window.height - 45);
+            _scroll = GUI.BeginScrollView(scrollArea, _scroll,
+                new Rect(0, 0, _window.width - 40, _contentHeight));
 
             GUILayout.BeginVertical();
             {
@@ -239,10 +242,16 @@ namespace UEBS2PathingMod
             }
             GUILayout.EndVertical();
 
-            GUILayout.EndScrollView();
+            // Capture the actual content height for the scroll view's content rect.
+            if (Event.current.type == EventType.Repaint)
+            {
+                _contentHeight = GUILayoutUtility.GetLastRect().height + 20f;
+            }
 
-            // For GUILayout.Window, drag handle must be called after the layout group.
-            GUI.DragWindow(new Rect(0, 0, 10000, 20));
+            GUI.EndScrollView();
+
+            // Drag handle at the top of the window.
+            GUI.DragWindow(new Rect(0, 0, 10000, 22));
         }
     }
 }
