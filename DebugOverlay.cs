@@ -25,6 +25,7 @@ namespace UEBS2PathingMod
         internal bool ShowRealign = true;
         internal bool ShowFlowField = true;
         internal bool ShowMomentum = true;
+        internal bool ShowFrontLine = true;
         internal bool Enabled = false;
 
         // ---- Momentum history (for scrolling curve graph) ----
@@ -174,6 +175,7 @@ namespace UEBS2PathingMod
             if (ShowRealign) DrawRealignFlashes();
             if (ShowFlowField) DrawFlowFieldZones();
             if (ShowMomentum) DrawMomentumGraph();
+            if (ShowFrontLine) DrawFrontLines();
         }
 
         // ---- 1. Threat scores ----
@@ -401,6 +403,132 @@ namespace UEBS2PathingMod
                 GUI.Label(new Rect(legendX + idx2 * 60 + 10, legendY - 2, 50, 12),
                     $"T{h.Team}", _smallStyle);
             }
+        }
+
+        // ---- 6. Dynamic front line overlay ----
+        // Draws a polyline per team showing:
+        //   - Front curvature (the shape of the line, flank to flank)
+        //   - Pressure zones (color along the line: green=stable, yellow=pressure, red=collapsing)
+        //   - Collapse points (red X markers where the front is breaking)
+        //   - Surge vectors (arrows showing push direction and intensity)
+        //
+        // This makes multi-front wars readable at a glance.
+
+        private void DrawFrontLines()
+        {
+            var frontData = SubGroupFracture.GetFrontLineData();
+            if (frontData == null || frontData.Count == 0) return;
+
+            foreach (var front in frontData)
+            {
+                if (front.Points == null || front.Points.Count < 1) continue;
+
+                Color teamColor = GetTeamColor(front.Team);
+                int n = front.Points.Count;
+
+                // 1. Draw the front polyline (curvature).
+                //    Color each segment by the average pressure of its endpoints.
+                for (int i = 0; i < n - 1; i++)
+                {
+                    var a = WorldToScreen(front.Points[i].Position);
+                    var b = WorldToScreen(front.Points[i + 1].Position);
+                    if (!a.HasValue || !b.HasValue) continue;
+
+                    float avgPressure = (front.Points[i].Pressure + front.Points[i + 1].Pressure) * 0.5f;
+                    Color segColor = PressureToColor(avgPressure, teamColor);
+                    DrawLine(a.Value, b.Value, segColor, 3f);
+                }
+
+                // 2. Draw pressure markers at each point.
+                //    Circle size = unit count, color = pressure level.
+                foreach (var pt in front.Points)
+                {
+                    var screen = WorldToScreen(pt.Position);
+                    if (!screen.HasValue) continue;
+
+                    Color pColor = pt.Collapsing
+                        ? new Color(1f, 0.1f, 0.1f, 0.9f)
+                        : PressureToColor(pt.Pressure, teamColor);
+
+                    int markerSize = Mathf.Clamp(pt.Remaining / 50, 8, 40);
+                    DrawBox(screen.Value, markerSize, markerSize, pColor);
+                    DrawBoxOutline(screen.Value, markerSize, markerSize,
+                        new Color(pColor.r, pColor.g, pColor.b, 1f));
+
+                    // 3. Collapse point — draw a red X.
+                    if (pt.Collapsing)
+                    {
+                        int xs = markerSize + 6;
+                        DrawLine(screen.Value - new Vector2(xs, xs),
+                                 screen.Value + new Vector2(xs, xs),
+                                 new Color(1f, 0.1f, 0.1f, 0.9f), 3f);
+                        DrawLine(screen.Value - new Vector2(xs, -xs),
+                                 screen.Value + new Vector2(xs, -xs),
+                                 new Color(1f, 0.1f, 0.1f, 0.9f), 3f);
+
+                        DrawLabel(screen.Value + new Vector2(0, -markerSize - 12),
+                            "<color=red>COLLAPSE</color>", Color.white);
+                    }
+
+                    // 4. Surge vector — arrow showing push direction and intensity.
+                    if (pt.SurgeStrength > 0.05f && pt.SurgeDir != Vector3.zero)
+                    {
+                        // Arrow start = group position, end = position + dir * strength * scale.
+                        float arrowLen = 40 + pt.SurgeStrength * 80;
+                        Vector3 worldEnd = pt.Position + pt.SurgeDir * (pt.SurgeStrength * 60f);
+                        var endScreen = WorldToScreen(worldEnd);
+                        if (endScreen.HasValue)
+                        {
+                            Color arrowColor = teamColor;
+                            arrowColor.a = 0.5f + pt.SurgeStrength * 0.5f;
+                            DrawArrow(screen.Value, endScreen.Value, arrowColor, 2.5f);
+                        }
+                    }
+
+                    // Label with unit count and morale.
+                    string moraleTag = pt.Morale < 0.3f ? "<color=red>"
+                        : pt.Morale < 0.6f ? "<color=yellow>" : "<color=green>";
+                    DrawLabel(screen.Value + new Vector2(0, markerSize + 4),
+                        $"T{pt.Team} {pt.Remaining}u {moraleTag}M{pt.Morale:F1}</color>",
+                        Color.white);
+                }
+            }
+        }
+
+        /// <summary>Map pressure 0..1 to a color, biased by team color.</summary>
+        private static Color PressureToColor(float pressure, Color teamColor)
+        {
+            // 0 = team color (stable), 0.5 = yellow (pressure), 1 = red (collapsing)
+            if (pressure < 0.5f)
+            {
+                float t = pressure * 2f;
+                return Color.Lerp(teamColor, new Color(0.9f, 0.8f, 0.2f, 0.8f), t);
+            }
+            else
+            {
+                float t = (pressure - 0.5f) * 2f;
+                return Color.Lerp(new Color(0.9f, 0.8f, 0.2f, 0.8f),
+                    new Color(0.9f, 0.2f, 0.1f, 0.9f), t);
+            }
+        }
+
+        /// <summary>Draw an arrow from a to b with an arrowhead.</summary>
+        private static void DrawArrow(Vector2 a, Vector2 b, Color color, float width)
+        {
+            DrawLine(a, b, color, width);
+
+            // Arrowhead: two short lines at 30° from the end.
+            var dir = (b - a).normalized;
+            float headLen = 12f;
+            float angle = 30f * Mathf.Deg2Rad;
+            float cos = Mathf.Cos(angle);
+            float sin = Mathf.Sin(angle);
+
+            // Rotate dir by ±angle and draw head lines.
+            var dir1 = new Vector2(dir.x * cos - dir.y * sin, dir.x * sin + dir.y * cos);
+            var dir2 = new Vector2(dir.x * cos + dir.y * sin, -dir.x * sin + dir.y * cos);
+            DrawLine(b, b - dir1 * headLen, color, width);
+            DrawLine(b, b - dir2 * headLen, color, width);
         }
 
         // ---- Drawing helpers ----

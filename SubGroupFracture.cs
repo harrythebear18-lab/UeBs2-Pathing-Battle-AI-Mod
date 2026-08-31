@@ -1318,5 +1318,170 @@ namespace UEBS2PathingMod
             }
             return list;
         }
+
+        // ---- Front line debug data ----
+
+        internal struct FrontLinePoint
+        {
+            public Vector3 Position;       // sub-group centroid
+            public int Team;
+            public float Pressure;         // 0..1, how much pressure this point is under
+            public bool Collapsing;        // true if this point is collapsing
+            public Vector3 SurgeDir;       // normalized movement direction (surge vector)
+            public float SurgeStrength;    // 0..1, momentum-based surge intensity
+            public int Remaining;          // unit count at this point
+            public float Morale;           // morale at this point
+        }
+
+        internal struct FrontLineData
+        {
+            public int Team;
+            public List<FrontLinePoint> Points;  // sorted along the front
+            public Vector3 Center;               // average position
+            public Vector3 Facing;               // average facing direction (toward enemy)
+        }
+
+        /// <summary>
+        /// Compute per-team front line polylines for the debug overlay.
+        /// Each team's sub-groups are sorted along the axis perpendicular to
+        /// their average facing direction, forming a polyline that traces
+        /// the front curvature. Pressure, collapse, and surge data are
+        /// included per point.
+        /// </summary>
+        internal static List<FrontLineData> GetFrontLineData()
+        {
+            var result = new List<FrontLineData>();
+
+            // Group sub-groups by team.
+            var byTeam = new Dictionary<int, List<SubGroup>>();
+            foreach (var sg in _subGroups)
+            {
+                if (!byTeam.ContainsKey(sg.Team))
+                    byTeam[sg.Team] = new List<SubGroup>();
+                byTeam[sg.Team].Add(sg);
+            }
+
+            foreach (var kv in byTeam)
+            {
+                int team = kv.Key;
+                var groups = kv.Value;
+                if (groups.Count == 0) continue;
+
+                // Compute team center.
+                Vector3 center = Vector3.zero;
+                foreach (var sg in groups) center += sg.Centroid;
+                center /= groups.Count;
+
+                // Compute average facing direction (toward nearest enemy team center).
+                Vector3 facing = Vector3.forward;
+                float nearestEnemyTeamDist = float.MaxValue;
+                Vector3 nearestEnemyCenter = center;
+                foreach (var otherKv in byTeam)
+                {
+                    if (otherKv.Key == team) continue;
+                    Vector3 otherCenter = Vector3.zero;
+                    foreach (var sg in otherKv.Value) otherCenter += sg.Centroid;
+                    otherCenter /= otherKv.Value.Count;
+                    float d = Vector3.Distance(center, otherCenter);
+                    if (d < nearestEnemyTeamDist)
+                    {
+                        nearestEnemyTeamDist = d;
+                        nearestEnemyCenter = otherCenter;
+                    }
+                }
+                if (nearestEnemyCenter != center)
+                {
+                    facing = (nearestEnemyCenter - center).normalized;
+                    facing.y = 0;
+                }
+
+                // Perpendicular axis (along the front line).
+                Vector3 perp = new Vector3(-facing.z, 0, facing.x).normalized;
+
+                // Sort sub-groups by their projection along the perpendicular axis.
+                // This traces the front line from one flank to the other.
+                groups.Sort((a, b) =>
+                {
+                    float pa = Vector3.Dot(a.Centroid - center, perp);
+                    float pb = Vector3.Dot(b.Centroid - center, perp);
+                    return pa.CompareTo(pb);
+                });
+
+                // Build front line points with pressure/collapse/surge data.
+                var points = new List<FrontLinePoint>();
+                foreach (var sg in groups)
+                {
+                    float pressure = 0f;
+                    bool collapsing = false;
+
+                    // Pressure: ratio of enemy threat to our strength.
+                    if (sg.HighThreatRemaining > 0 && sg.TotalRemaining > 0)
+                    {
+                        pressure = Mathf.Clamp01(
+                            (float)sg.HighThreatRemaining / (sg.TotalRemaining * 3f));
+                    }
+
+                    // Collapse: morale below retreat threshold or momentum in deep trough.
+                    collapsing = sg.Morale < RetreatThreshold;
+                    if (!collapsing && BattleMomentum.Enabled)
+                    {
+                        int momIdx = _subGroups.IndexOf(sg);
+                        var momState = BattleMomentum.GetState(momIdx);
+                        if (momState != null && momState.Momentum < 0.1f
+                            && momState.Phase == BattleMomentum.WavePhase.Consolidate)
+                            collapsing = true;
+                    }
+
+                    // Surge vector: direction toward nearest enemy, strength from momentum.
+                    Vector3 surgeDir = Vector3.zero;
+                    float surgeStrength = 0f;
+                    if (sg.NearestEnemyDist < float.MaxValue)
+                    {
+                        surgeDir = (sg.NearestEnemyPos - sg.Centroid).normalized;
+                        surgeDir.y = 0;
+                        if (BattleMomentum.Enabled)
+                        {
+                            int momIdx = _subGroups.IndexOf(sg);
+                            var momState = BattleMomentum.GetState(momIdx);
+                            if (momState != null)
+                            {
+                                surgeStrength = momState.Momentum;
+                                if (momState.Phase == BattleMomentum.WavePhase.Surge)
+                                    surgeStrength = Mathf.Clamp01(surgeStrength * 1.3f);
+                                else if (momState.Phase == BattleMomentum.WavePhase.Consolidate
+                                    || momState.Phase == BattleMomentum.WavePhase.Recovering)
+                                    surgeStrength *= 0.3f; // pausing — weak surge
+                            }
+                        }
+                        else
+                        {
+                            surgeStrength = sg.IsWinning ? 0.7f : sg.IsEngaged ? 0.4f : 0.2f;
+                        }
+                    }
+
+                    points.Add(new FrontLinePoint
+                    {
+                        Position = sg.Centroid,
+                        Team = team,
+                        Pressure = pressure,
+                        Collapsing = collapsing,
+                        SurgeDir = surgeDir,
+                        SurgeStrength = surgeStrength,
+                        Remaining = sg.TotalRemaining,
+                        Morale = sg.Morale,
+                    });
+                }
+
+                result.Add(new FrontLineData
+                {
+                    Team = team,
+                    Points = points,
+                    Center = center,
+                    Facing = facing,
+                });
+            }
+
+            return result;
+        }
     }
 }

@@ -456,6 +456,8 @@ namespace UEBS2PathingMod
                             "  Flow-field zones (blockers, corridors, retreat waves)");
                         i.DebugOverlay.ShowMomentum = GUILayout.Toggle(i.DebugOverlay.ShowMomentum,
                             "  Momentum curves (scrolling graph)");
+                        i.DebugOverlay.ShowFrontLine = GUILayout.Toggle(i.DebugOverlay.ShowFrontLine,
+                            "  Dynamic front lines (curvature, pressure, collapse, surge)");
                     }
                 }
 
