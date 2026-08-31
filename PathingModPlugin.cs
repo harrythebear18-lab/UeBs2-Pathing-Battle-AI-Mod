@@ -53,6 +53,8 @@ namespace UEBS2PathingMod
         internal ConfigEntry<bool> FractureAggressionBoost;
         internal ConfigEntry<float> FractureDispersion;
         internal ConfigEntry<float> FractureDispersionWidth;
+        internal ConfigEntry<bool> FlowFieldModulation;
+        internal ConfigEntry<float> FlowFieldBlockStrength;
 
         private Harmony _harmony;
 
@@ -117,11 +119,17 @@ namespace UEBS2PathingMod
                 "Spread units across a wider front instead of tight columns. 0=vanilla, 1=very wide.");
             FractureDispersionWidth = Config.Bind("Fracture", "DispersionWidth", 200f,
                 "Maximum lateral spread distance for multi-point dispersion targets.");
+            FlowFieldModulation = Config.Bind("FlowField", "Enabled", true,
+                "Inject soft obstacles into the GPU obstacle grid to redirect flow fields. Enables flanking, corridors, and dispersion.");
+            FlowFieldBlockStrength = Config.Bind("FlowField", "BlockStrength", 0.7f,
+                "Strength of soft obstacle walls (0=none, 1=hard wall). Lower = units may push through.");
 
             _harmony = new Harmony(Guid);
             _harmony.PatchAll(typeof(Patches));
             _harmony.PatchAll(typeof(PathingModUI));
             _harmony.PatchAll(typeof(CinematicPatches));
+            // PaintModeUI doesn't have its own Harmony patches — it's driven
+            // by PathingModUI's ThreadManager hooks. No need to patch it.
 
             Logger.LogInfo($"{Name} v{Version} loaded. Press Numpad+ for the tuning window.");
         }
@@ -284,12 +292,35 @@ namespace UEBS2PathingMod
                         }
                     }
                 }
+
+                // Apply flow field modulation (soft obstacles) before the
+                // game's compute dispatch reads ObstacleGrid.
+                if (i.FlowFieldModulation.Value)
+                {
+                    FlowFieldModulator.BlockStrength = i.FlowFieldBlockStrength.Value;
+                    FlowFieldModulator.Apply();
+                }
             }
             catch (Exception e)
             {
                 // Never let a mod exception kill the game's nav loop.
                 Debug.LogWarning($"[PathingMod] NavGrid prefix error: {e}");
             }
+        }
+
+        /// <summary>
+        /// Postfix on NavGrid.Update: restore ObstacleGrid after the game's
+        /// compute dispatch so our soft obstacles don't persist.
+        /// </summary>
+        [HarmonyPostfix]
+        [HarmonyPatch(typeof(NavGrid), "Update")]
+        public static void NavGridUpdatePostfix()
+        {
+            try
+            {
+                FlowFieldModulator.Restore();
+            }
+            catch { /* non-critical */ }
         }
 
         /// <summary>

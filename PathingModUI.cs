@@ -25,11 +25,30 @@ namespace UEBS2PathingMod
         [HarmonyPatch(typeof(ThreadManager), "Update")]
         public static void ThreadManagerUpdatePrefix()
         {
+            // Settings UI toggle (Numpad+).
             if (Input.GetKeyUp(KeyCode.KeypadPlus) ||
                 (_visible && Input.GetKeyUp(KeyCode.Escape)))
             {
                 _visible = !_visible;
+                if (_visible && PaintModeUI.Active)
+                {
+                    // Don't allow both UIs at once — settings takes priority.
+                    PaintModeUI.Toggle();
+                }
             }
+
+            // Paint mode toggle (Numpad-).
+            if (Input.GetKeyUp(KeyCode.Keypad9))
+            {
+                PaintModeUI.Toggle();
+                if (PaintModeUI.Active && _visible)
+                {
+                    _visible = false;
+                }
+            }
+
+            // Paint mode input handling.
+            PaintModeUI.Tick();
         }
 
         /// <summary>
@@ -42,11 +61,22 @@ namespace UEBS2PathingMod
         [HarmonyPatch(typeof(FlyCam), "Update")]
         public static void FlyCamUpdatePrefix(FlyCam __instance)
         {
-            if (!_visible) return;
+            // Settings UI: capture mouse, suppress camera.
+            if (_visible)
+            {
+                Cursor.lockState = CursorLockMode.None;
+                Cursor.visible = true;
+                return;
+            }
 
-            // Force cursor free for the UI.
-            Cursor.lockState = CursorLockMode.None;
-            Cursor.visible = true;
+            // Paint mode: keep cursor visible for clicking, but let camera work.
+            if (PaintModeUI.Active)
+            {
+                Cursor.visible = true;
+                Cursor.lockState = CursorLockMode.None;
+                // Don't suppress camera — user needs to pan/zoom to position.
+                return;
+            }
 
             // Kill mouse look input so the camera doesn't rotate while we
             // interact with the window. We can't stop Input.GetAxis directly,
@@ -65,16 +95,24 @@ namespace UEBS2PathingMod
         [HarmonyPatch(typeof(FlyCam), "Update")]
         public static void FlyCamUpdatePostfix(FlyCam __instance)
         {
-            if (!_visible) return;
+            // Settings UI: suppress camera rotation.
+            if (_visible)
+            {
+                Cursor.lockState = CursorLockMode.None;
+                Cursor.visible = true;
+                var t = Traverse.Create(__instance);
+                t.Field("RotAdd").SetValue(Vector2.zero);
+                return;
+            }
 
-            // Re-assert cursor freedom — FlyCam.Update locks it.
-            Cursor.lockState = CursorLockMode.None;
-            Cursor.visible = true;
-
-            // Zero out the rotation accumulator so mouse movement doesn't
-            // accumulate into camera rotation while the UI is open.
-            var t = Traverse.Create(__instance);
-            t.Field("RotAdd").SetValue(Vector2.zero);
+            // Paint mode: keep cursor visible (game may lock it in free-cam).
+            if (PaintModeUI.Active)
+            {
+                Cursor.visible = true;
+                Cursor.lockState = CursorLockMode.None;
+                // Don't zero RotAdd — let the camera rotate normally.
+                // But do suppress cursor lock so the user can click.
+            }
         }
 
         // Draw the window after the game's own OnGUI pass so it sits on top.
@@ -90,16 +128,18 @@ namespace UEBS2PathingMod
             }
             _wasVisible = _visible;
 
-            if (!_visible) return;
+            if (!_visible)
+            {
+                // Even when settings UI is closed, draw paint mode HUD if active.
+                PaintModeUI.DrawHUD();
+                return;
+            }
 
             // Re-assert cursor freedom every frame while open.
             Cursor.lockState = CursorLockMode.None;
             Cursor.visible = true;
 
             EnsureStyles();
-            // Use GUI.Window (fixed rect) instead of GUILayout.Window.
-            // GUILayout.Window + scroll view fights for layout control and
-            // collapses to a tiny size. Fixed rect gives us reliable dimensions.
             _window = GUI.Window(9876543, _window, DrawWindow, "UEBS2 Pathing & Team AI");
         }
 
@@ -186,6 +226,12 @@ namespace UEBS2PathingMod
                 i.FractureDispersion.Value = GUILayout.HorizontalSlider(i.FractureDispersion.Value, 0f, 1f);
                 GUILayout.Label($"  Dispersion width: {i.FractureDispersionWidth.Value:F0}  (max lateral spread)");
                 i.FractureDispersionWidth.Value = GUILayout.HorizontalSlider(i.FractureDispersionWidth.Value, 50f, 500f);
+
+                GUILayout.Space(4);
+                GUILayout.Label("Flow Field Modulation", _header);
+                i.FlowFieldModulation.Value = GUILayout.Toggle(i.FlowFieldModulation.Value, "  Inject soft obstacles to redirect paths");
+                GUILayout.Label($"  Block strength: {i.FlowFieldBlockStrength.Value:F2}  (0=none, 1=hard wall)");
+                i.FlowFieldBlockStrength.Value = GUILayout.HorizontalSlider(i.FlowFieldBlockStrength.Value, 0f, 1f);
 
                 GUILayout.Space(6);
                 GUILayout.Label("UI", _header);

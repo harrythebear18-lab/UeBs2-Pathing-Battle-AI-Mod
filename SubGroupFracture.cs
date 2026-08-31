@@ -146,6 +146,7 @@ namespace UEBS2PathingMod
             _subGroups.Clear();
             _fracturingArmyIds.Clear();
             _retreatingArmyIds.Clear();
+            FlowFieldModulator.ClearBlockers();
 
             // 1. Cluster each team's armies into spatial sub-groups.
             for (int ti = 0; ti < teams.Count; ti++)
@@ -763,10 +764,32 @@ namespace UEBS2PathingMod
                     // NearestEnemyPos was set to the flank point by DecideAndAct.
                     dest = sg.NearestEnemyPos;
                     avoidEnemies = false; // attack-move toward the fort
+
+                    // Block the direct path to the fort center so the flow field
+                    // routes units to the flank point instead of beelining.
+                    {
+                        var fort = FortificationAnalysis.GetNearestEnemyFortification(sg.Centroid, sg.Team);
+                        if (fort.HasValue)
+                        {
+                            FlowFieldModulator.BlockDirectPath(sg.Centroid, fort.Value.Center,
+                                wallWidth: 80f, strength: 0.7f);
+                        }
+                    }
                     break;
 
                 default:
                     return;
+            }
+
+            // Add dispersion fan behind the destination to spread the flow field
+            // attractor, so units approach in a wider formation instead of a column.
+            if (DispersionFactor > 0.3f && action != FractureAction.Rout)
+            {
+                Vector3 approachDir = (dest - sg.Centroid).normalized;
+                FlowFieldModulator.CreateDispersionFan(dest, approachDir,
+                    radius: DispersionWidth * 0.5f,
+                    numBlocks: Mathf.Clamp(Mathf.RoundToInt(DispersionFactor * 5), 2, 7),
+                    strength: 0.3f * DispersionFactor);
             }
 
             // Find the team list index for NavGrid.AddTarget (which uses list index as Team).
