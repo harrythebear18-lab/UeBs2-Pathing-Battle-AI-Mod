@@ -80,6 +80,7 @@ namespace UEBS2PathingMod
         internal ConfigEntry<bool> OllamaAutoApply;
 
         internal BattleAgent Agent;
+        internal DebugOverlay DebugOverlay;
 
         private Harmony _harmony;
 
@@ -196,6 +197,9 @@ namespace UEBS2PathingMod
             Agent.VisionModel = OllamaVisionModel.Value;
             Agent.CoderModel = OllamaCoderModel.Value;
 
+            // Initialize the debug overlay.
+            DebugOverlay = gameObject.AddComponent<DebugOverlay>();
+
             _harmony = new Harmony(Guid);
             _harmony.PatchAll(typeof(Patches));
             _harmony.PatchAll(typeof(PathingModUI));
@@ -234,6 +238,13 @@ namespace UEBS2PathingMod
             {
                 Agent.AnalyzeNow();
                 Logger.LogInfo("[BattleAgent] Manual analysis triggered.");
+            }
+
+            // Numpad7: toggle debug overlay.
+            if (Input.GetKeyDown(KeyCode.Keypad7) && DebugOverlay != null)
+            {
+                DebugOverlay.Enabled = !DebugOverlay.Enabled;
+                Logger.LogInfo($"[DebugOverlay] {(DebugOverlay.Enabled ? "Enabled" : "Disabled")}.");
             }
         }
 

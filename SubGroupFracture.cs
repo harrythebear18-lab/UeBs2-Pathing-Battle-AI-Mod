@@ -1079,6 +1079,13 @@ namespace UEBS2PathingMod
                                 momState.Momentum + RealignMomentumBoost);
                         }
                     }
+
+                    // Record realign for debug overlay.
+                    if (PathingModPlugin.Instance != null && PathingModPlugin.Instance.DebugOverlay != null)
+                    {
+                        PathingModPlugin.Instance.DebugOverlay.RecordRealign(
+                            sg.Centroid, sg.CurrentEngagementPos, sg.HighThreatEnemy);
+                    }
                     break;
 
                 default:
@@ -1250,6 +1257,63 @@ namespace UEBS2PathingMod
                     Holding = sg.IsHolding,
                     HeightAdv = sg.Terrain.HeightAdvantage,
                     HasCover = sg.Terrain.HasCover,
+                });
+            }
+            return list;
+        }
+
+        // ---- Debug overlay data ----
+
+        internal struct ThreatDebugData
+        {
+            public int Team;
+            public Vector3 EnemyPos;
+            public float Score;
+            public int Remaining;
+        }
+
+        internal static List<ThreatDebugData> GetThreatDebugData()
+        {
+            var list = new List<ThreatDebugData>();
+            foreach (var sg in _subGroups)
+            {
+                if (sg.HighThreatScore <= 0) continue;
+                list.Add(new ThreatDebugData
+                {
+                    Team = sg.Team,
+                    EnemyPos = sg.HighThreatEnemy,
+                    Score = sg.HighThreatScore,
+                    Remaining = sg.HighThreatRemaining,
+                });
+            }
+            return list;
+        }
+
+        internal struct CohesionDebugData
+        {
+            public int Team;
+            public Vector3 GroupPos;
+            public string Action;
+            public bool ShouldRealign;
+            public bool IsEngaged;
+            public int CurrentRemaining;
+            public int HighThreatRemaining;
+        }
+
+        internal static List<CohesionDebugData> GetCohesionDebugData()
+        {
+            var list = new List<CohesionDebugData>();
+            foreach (var sg in _subGroups)
+            {
+                list.Add(new CohesionDebugData
+                {
+                    Team = sg.Team,
+                    GroupPos = sg.Centroid,
+                    Action = sg.CurrentAction.ToString(),
+                    ShouldRealign = sg.ShouldRealign,
+                    IsEngaged = sg.IsEngaged,
+                    CurrentRemaining = sg.CurrentEngagementRemaining,
+                    HighThreatRemaining = sg.HighThreatRemaining,
                 });
             }
             return list;

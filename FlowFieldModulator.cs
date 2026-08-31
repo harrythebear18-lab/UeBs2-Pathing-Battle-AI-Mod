@@ -59,6 +59,12 @@ namespace UEBS2PathingMod
         /// <summary>Clear all blockers.</summary>
         internal static void ClearBlockers() => _blockers.Clear();
 
+        /// <summary>Get a snapshot of current blockers for the debug overlay.</summary>
+        internal static List<Blocker> GetBlockersForDebug()
+        {
+            return new List<Blocker>(_blockers);
+        }
+
         /// <summary>
         /// Initialize the modulation system. Called lazily on first use.
         /// Creates textures matching the game's ObstacleGrid format.

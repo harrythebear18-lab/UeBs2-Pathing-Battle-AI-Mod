@@ -437,8 +437,31 @@ namespace UEBS2PathingMod
                 }
 
                 GUILayout.Space(6);
+
+                // ---- Debug Overlay ----
+                GUILayout.Label("Debug Overlay (Numpad7)", _header);
+                if (i.DebugOverlay != null)
+                {
+                    i.DebugOverlay.Enabled = GUILayout.Toggle(i.DebugOverlay.Enabled,
+                        "  Enable visual debug overlay");
+                    if (i.DebugOverlay.Enabled)
+                    {
+                        i.DebugOverlay.ShowThreat = GUILayout.Toggle(i.DebugOverlay.ShowThreat,
+                            "  Threat scores (enemy clusters, color-coded)");
+                        i.DebugOverlay.ShowCohesion = GUILayout.Toggle(i.DebugOverlay.ShowCohesion,
+                            "  Cohesion state (sub-group actions, realign status)");
+                        i.DebugOverlay.ShowRealign = GUILayout.Toggle(i.DebugOverlay.ShowRealign,
+                            "  Realign triggers (flash lines on target switch)");
+                        i.DebugOverlay.ShowFlowField = GUILayout.Toggle(i.DebugOverlay.ShowFlowField,
+                            "  Flow-field zones (blockers, corridors, retreat waves)");
+                        i.DebugOverlay.ShowMomentum = GUILayout.Toggle(i.DebugOverlay.ShowMomentum,
+                            "  Momentum curves (scrolling graph)");
+                    }
+                }
+
+                GUILayout.Space(6);
                 GUILayout.Label("Numpad+ or Esc to close (releases mouse back to the game).", _small);
-                GUILayout.Label("Numpad8 = manual AI analysis  |  Numpad9 = paint mode", _small);
+                GUILayout.Label("Numpad7 = debug overlay  |  Numpad8 = AI analysis  |  Numpad9 = paint mode", _small);
             }
             GUILayout.EndVertical();
 
