@@ -40,6 +40,7 @@ namespace UEBS2PathingMod
         internal static bool AggressionBoost = true;
         internal static float DispersionFactor = 0.5f;   // 0=vanilla tight, 1=very wide spread
         internal static float DispersionWidth = 200f;     // max lateral spread for multi-point targets
+        internal static bool FlowFieldModulationEnabled = true;
 
         // ---- Runtime state ----
         private static float _timer;
@@ -781,17 +782,6 @@ namespace UEBS2PathingMod
                     return;
             }
 
-            // Add dispersion fan behind the destination to spread the flow field
-            // attractor, so units approach in a wider formation instead of a column.
-            if (DispersionFactor > 0.3f && action != FractureAction.Rout)
-            {
-                Vector3 approachDir = (dest - sg.Centroid).normalized;
-                FlowFieldModulator.CreateDispersionFan(dest, approachDir,
-                    radius: DispersionWidth * 0.5f,
-                    numBlocks: Mathf.Clamp(Mathf.RoundToInt(DispersionFactor * 5), 2, 7),
-                    strength: 0.3f * DispersionFactor);
-            }
-
             // Find the team list index for NavGrid.AddTarget (which uses list index as Team).
             int teamListIndex = -1;
             for (int t = 0; t < ThreadManager.Teams.Count; t++)
@@ -800,18 +790,25 @@ namespace UEBS2PathingMod
             }
             if (teamListIndex < 0) return;
 
-            // ---- Dispersion: spread units across a wider front ----
-            // Instead of one target point (tight column), issue multiple targets
-            // offset perpendicular to the movement direction. The GPU flow field
-            // blends them into a broad attractor basin, so units spread out
-            // across a battle line instead of clumping.
+            // ---- Wide front formation + braided mixing ----
+            // The old approach placed multiple parallel targets, creating N
+            // parallel columns (deep, narrow). Real armies march in wide,
+            // shallow lines perpendicular to the direction of travel.
+            //
+            // New approach:
+            // 1. ONE target with a very wide formation length (wide front)
+            // 2. Braided diagonal soft obstacles along the path that force
+            //    units to weave side-to-side as they advance, mixing them
+            //    into a broad front instead of parallel channels.
 
             float dispersion = DispersionFactor;
+            int baseFormation = Mathf.Max(1, (int)Mathf.Sqrt(sg.TotalRemaining * 0.5f));
+
             if (dispersion <= 0f)
             {
                 // Vanilla: single target, game-default formation width.
                 IssueSingleTarget(dest, sg, teamListIndex, action, sgIndex, avoidEnemies,
-                    formationLength: Mathf.Max(1, (int)Mathf.Sqrt(sg.TotalRemaining * 0.5f)));
+                    formationLength: baseFormation);
                 return;
             }
 
@@ -819,34 +816,65 @@ namespace UEBS2PathingMod
             Vector3 moveDir = (dest - sg.Centroid).normalized;
             moveDir.y = 0;
             if (moveDir.sqrMagnitude < 0.01f) moveDir = Vector3.forward;
-            // Perpendicular axis (formation right vector).
+            // Perpendicular axis (formation right vector = across the front).
             Vector3 right = new Vector3(-moveDir.z, 0, moveDir.x).normalized;
 
-            // Wider formation length = broader GPU dispatch.
-            // Vanilla is sqrt(remaining * 0.5). We boost it by dispersion factor.
-            int baseFormation = Mathf.Max(1, (int)Mathf.Sqrt(sg.TotalRemaining * 0.5f));
+            // Wide formation length = broader GPU dispatch = wider front.
+            // The GPU dispatches `1 + FormationLength/16` threads in X,
+            // so a larger value directly widens the formation search.
+            // We want the front to be WIDE (perpendicular to travel) and
+            // SHALLOW (not deep in the travel direction).
             int wideFormation = Mathf.Max(baseFormation,
-                (int)(baseFormation * (1f + dispersion * 3f)));
+                (int)(baseFormation * (1f + dispersion * 4f)));
 
-            // Number of offset targets: more units + higher dispersion = more spread.
-            // Cap at 5 to avoid flooding the NavGrid target list.
-            int numOffsets = Mathf.Clamp(
-                Mathf.RoundToInt(dispersion * 4f * Mathf.Clamp01(sg.TotalRemaining / 500f)),
-                1, 5);
+            // Issue a SINGLE target with the wide formation.
+            // This creates one broad attractor, not parallel channels.
+            IssueSingleTarget(dest, sg, teamListIndex, action, sgIndex, avoidEnemies,
+                formationLength: wideFormation);
 
-            // Spread width scales with dispersion and unit count.
-            float spreadWidth = DispersionWidth * dispersion *
-                Mathf.Clamp01(Mathf.Sqrt(sg.TotalRemaining) / 30f);
-
-            for (int i = 0; i < numOffsets; i++)
+            // ---- Braided mixing obstacles ----
+            // Place diagonal soft obstacles along the path in a zigzag pattern.
+            // These force the flow field to weave, causing units to shift
+            // laterally as they advance. The result is a braided/mixed front
+            // instead of a rigid line or parallel columns.
+            //
+            // The zigzag pattern: alternating diagonal walls that block half
+            // the path width, forcing units to shift left then right.
+            if (FlowFieldModulationEnabled && dispersion > 0.2f)
             {
-                // Distribute offsets symmetrically around the center.
-                float t = numOffsets == 1 ? 0f : (float)i / (numOffsets - 1) - 0.5f;
-                Vector3 offset = right * t * spreadWidth;
-                Vector3 offsetDest = dest + offset;
+                float pathLength = Vector3.Distance(sg.Centroid, dest);
+                if (pathLength > 50f)
+                {
+                    float frontWidth = DispersionWidth * dispersion *
+                        Mathf.Clamp01(Mathf.Sqrt(sg.TotalRemaining) / 30f);
+                    // Number of zigzag segments along the path.
+                    int numZags = Mathf.Clamp(
+                        Mathf.RoundToInt(pathLength / 80f * dispersion),
+                        2, 8);
+                    // Each zigzag blocks half the front, alternating sides.
+                    // The diagonal angle forces units to weave.
+                    for (int z = 0; z < numZags; z++)
+                    {
+                        // Position along the path (0 = start, 1 = dest).
+                        float t = (float)(z + 1) / (numZags + 1);
+                        Vector3 along = sg.Centroid + (dest - sg.Centroid) * t;
 
-                IssueSingleTarget(offsetDest, sg, teamListIndex, action, sgIndex, avoidEnemies,
-                    formationLength: wideFormation, suffix: i > 0 ? $"_{i}" : "");
+                        // Alternate which side is blocked.
+                        bool blockRight = (z % 2 == 0);
+                        Vector3 blockOffset = (blockRight ? right : -right) * frontWidth * 0.25f;
+                        Vector3 blockCenter = along + blockOffset;
+
+                        // Diagonal wall: extends from the blocked side toward
+                        // the center, at an angle that forces lateral shift.
+                        // Width = half the front, depth = shallow (just a nudge).
+                        FlowFieldModulator.AddBlocker(
+                            blockCenter,
+                            frontWidth * 0.5f,  // wide (across front)
+                            12f,                // shallow (along path)
+                            0.3f * dispersion   // soft — just enough to redirect
+                        );
+                    }
+                }
             }
         }
 
