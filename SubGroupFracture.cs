@@ -119,6 +119,9 @@ namespace UEBS2PathingMod
 
             try
             {
+                // Tick momentum phases every frame for smooth wave timing.
+                BattleMomentum.Tick(Time.deltaTime);
+
                 AssessAndAct();
             }
             catch (Exception e)
@@ -165,6 +168,26 @@ namespace UEBS2PathingMod
             for (int i = 0; i < _subGroups.Count; i++)
             {
                 AssessSubGroup(_subGroups[i]);
+            }
+
+            // 2b. Sync battle momentum states with current sub-groups.
+            // This tracks per-group momentum, exhaustion, and wave phases
+            // (surge → engaged → consolidate → recover → ready → surge).
+            if (BattleMomentum.Enabled)
+            {
+                var momentumInputs = new List<(int, Vector3, int, float, bool, bool)>();
+                foreach (var sg in _subGroups)
+                {
+                    momentumInputs.Add((
+                        sg.Team,
+                        sg.Centroid,
+                        sg.TotalRemaining,
+                        sg.OurKills,
+                        sg.IsEngaged,
+                        sg.CurrentAction == FractureAction.None && !sg.IsHolding
+                            && sg.NearestEnemyDist < float.MaxValue));
+                }
+                BattleMomentum.SyncStates(momentumInputs);
             }
 
             // 3. Decide and issue fracture actions.
@@ -652,6 +675,48 @@ namespace UEBS2PathingMod
                 && sg.NearestEnemyDist < 200f && action == FractureAction.None)
             {
                 action = FractureAction.Pursue;
+            }
+
+            // ---- EBB & FLOW / WAVE PHASE LAYER ----
+            // Battle momentum creates natural surges and pauses.
+            //   SURGE phase: boost aggression — force pursuit even without
+            //     the normal aggression boost check.
+            //   CONSOLIDATE/RECOVERING phase: tactical pause — suppress
+            //     non-survival actions so the group holds and recovers.
+            //     This creates the "ebb" between waves.
+            //   READY phase: about to surge — hold briefly, building tension.
+            if (BattleMomentum.Enabled)
+            {
+                var momState = BattleMomentum.GetState(sgIndex);
+                if (momState != null)
+                {
+                    // SURGE: extra aggression — force pursuit if close to enemy.
+                    if (momState.Phase == BattleMomentum.WavePhase.Surge
+                        && action == FractureAction.None
+                        && sg.NearestEnemyDist < 250f
+                        && !sg.IsHolding)
+                    {
+                        action = FractureAction.Pursue;
+                    }
+
+                    // CONSOLIDATE / RECOVERING: tactical pause.
+                    // Only survival-level actions (rout, anti-flank, seek cover)
+                    // override the pause. Everything else gets suppressed so
+                    // the group holds position and recovers momentum.
+                    if (momState.Phase == BattleMomentum.WavePhase.Consolidate
+                        || momState.Phase == BattleMomentum.WavePhase.Recovering)
+                    {
+                        if (action != FractureAction.Rout
+                            && action != FractureAction.Reposition
+                            && action != FractureAction.SeekCover
+                            && action != FractureAction.Retreat)
+                        {
+                            action = FractureAction.None;
+                            // Mark as holding so the GPU keeps them in place.
+                            // The group will recover momentum during the pause.
+                        }
+                    }
+                }
             }
 
             sg.CurrentAction = action;

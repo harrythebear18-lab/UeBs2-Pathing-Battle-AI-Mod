@@ -56,6 +56,14 @@ namespace UEBS2PathingMod
         internal ConfigEntry<bool> FlowFieldModulation;
         internal ConfigEntry<float> FlowFieldBlockStrength;
 
+        // Battle momentum / ebb-and-flow
+        internal ConfigEntry<bool> MomentumEnabled;
+        internal ConfigEntry<float> MomentumExhaustionRate;
+        internal ConfigEntry<float> MomentumRecoveryRate;
+        internal ConfigEntry<float> MomentumSurgeThreshold;
+        internal ConfigEntry<float> MomentumConsolidateThreshold;
+        internal ConfigEntry<bool> MomentumWavePooling;
+
         // Ollama / AI battle agent (two-stage: vision + coder)
         internal ConfigEntry<bool> OllamaEnabled;
         internal ConfigEntry<float> OllamaInterval;
@@ -132,6 +140,20 @@ namespace UEBS2PathingMod
                 "Inject soft obstacles into the GPU obstacle grid to redirect flow fields. Enables flanking, corridors, and dispersion.");
             FlowFieldBlockStrength = Config.Bind("FlowField", "BlockStrength", 0.7f,
                 "Strength of soft obstacle walls (0=none, 1=hard wall). Lower = units may push through.");
+
+            // Battle momentum / ebb-and-flow
+            MomentumEnabled = Config.Bind("Momentum", "Enabled", true,
+                "Enable battle momentum system. Sub-groups cycle through wave phases (surge → engaged → consolidate → recover → ready) creating natural ebbs and flows.");
+            MomentumExhaustionRate = Config.Bind("Momentum", "ExhaustionRate", 0.08f,
+                "Momentum lost per second while engaged in combat. Higher = faster exhaustion = shorter surges.");
+            MomentumRecoveryRate = Config.Bind("Momentum", "RecoveryRate", 0.05f,
+                "Momentum regained per second while consolidating. Higher = faster recovery = shorter pauses.");
+            MomentumSurgeThreshold = Config.Bind("Momentum", "SurgeThreshold", 0.7f,
+                "Momentum level to trigger SURGE phase from READY. Higher = longer buildup before next push.");
+            MomentumConsolidateThreshold = Config.Bind("Momentum", "ConsolidateThreshold", 0.2f,
+                "Momentum level below which engaged groups enter CONSOLIDATE (tactical pause). Higher = groups pause sooner.");
+            MomentumWavePooling = Config.Bind("Momentum", "WavePooling", true,
+                "Pool NavGrid target slots by wave phase. SURGE/READY groups get priority; CONSOLIDATE/RECOVERING groups yield slots. Creates pulsing GPU budget allocation.");
 
             // Ollama AI battle agent (two-stage: Qwen VL eyes + Qwen Coder actor)
             OllamaEnabled = Config.Bind("Ollama", "Enabled", false,
@@ -319,6 +341,15 @@ namespace UEBS2PathingMod
                 SubGroupFracture.AggressionBoost = i.FractureAggressionBoost.Value;
                 SubGroupFracture.DispersionFactor = i.FractureDispersion.Value;
                 SubGroupFracture.DispersionWidth = i.FractureDispersionWidth.Value;
+
+                // Battle momentum / ebb-and-flow config sync.
+                BattleMomentum.Enabled = i.MomentumEnabled.Value;
+                BattleMomentum.ExhaustionRate = i.MomentumExhaustionRate.Value;
+                BattleMomentum.RecoveryRate = i.MomentumRecoveryRate.Value;
+                BattleMomentum.SurgeThreshold = i.MomentumSurgeThreshold.Value;
+                BattleMomentum.ConsolidateThreshold = i.MomentumConsolidateThreshold.Value;
+                BattleMomentum.WavePoolingEnabled = i.MomentumWavePooling.Value;
+
                 if (i.FractureEnabled.Value)
                 {
                     SubGroupFracture.Tick();
@@ -327,16 +358,35 @@ namespace UEBS2PathingMod
                     // The game's own round-robin only processes a few targets per frame,
                     // so we add extra FullSearch dispatches to make sure our fracture
                     // orders actually reach the units quickly.
+                    //
+                    // WAVE-BASED POOLING: when momentum wave pooling is enabled,
+                    // we prioritize FullSearch dispatches by sub-group pool priority.
+                    // SURGE/READY groups get searches first; CONSOLIDATE/RECOVERING
+                    // groups yield their slots (they're holding anyway). This creates
+                    // the "pulse" effect — GPU pathfinding budget flows to the groups
+                    // that are actively pushing, not the ones pausing.
                     if (NavGrid.TargetList != null && NavGrid.TargetList.Count > 0)
                     {
                         float agg = PathingModPlugin.EffectiveAggressiveness;
                         int extraSearches = Mathf.RoundToInt(3 * agg);
-                        for (int s = 0; s < extraSearches && s < NavGrid.TargetList.Count; s++)
+
+                        // Collect our targets with their pool priorities.
+                        var prioritized = new System.Collections.Generic.List<(Target tgt, int priority)>();
+                        foreach (var tgt in NavGrid.TargetList)
                         {
-                            var tgt = NavGrid.TargetList[s];
                             if (tgt == null || !tgt.Active) continue;
-                            // Only boost our own targets (name starts with PathingMod).
                             if (!tgt.name.StartsWith("PathingMod")) continue;
+                            // Extract sgIndex from target name: PathingMod_Fracture_SG{idx}_...
+                            int sgIdx = ExtractSgIndexFromName(tgt.name);
+                            int priority = BattleMomentum.GetPoolPriority(sgIdx);
+                            prioritized.Add((tgt, priority));
+                        }
+                        // Sort by priority descending (surge groups first).
+                        prioritized.Sort((a, b) => b.priority.CompareTo(a.priority));
+
+                        for (int s = 0; s < extraSearches && s < prioritized.Count; s++)
+                        {
+                            var tgt = prioritized[s].tgt;
                             NavGrid.FullSearch(tgt.transform.position, tgt.Team,
                                 tgt.RangeSearchAmount, OrderGrid: true,
                                 tgt.FormationLength, tgt.SearchGrid,
@@ -463,6 +513,26 @@ namespace UEBS2PathingMod
 
         /// <summary>Expose priorities for the UI / scheduler.</summary>
         internal static float[] TeamPriorities => _teamPriority;
+
+        /// <summary>
+        /// Extract the sub-group index from a fracture target's name.
+        /// Target names are like "PathingMod_Fracture_SG3_Pursue" → returns 3.
+        /// Returns -1 if parsing fails.
+        /// </summary>
+        private static int ExtractSgIndexFromName(string name)
+        {
+            // Find "SG" followed by digits.
+            int sgIdx = name.IndexOf("SG");
+            if (sgIdx < 0) return -1;
+            int start = sgIdx + 2;
+            int end = start;
+            while (end < name.Length && char.IsDigit(name[end])) end++;
+            if (end <= start) return -1;
+            int result;
+            if (int.TryParse(name.Substring(start, end - start), out result))
+                return result;
+            return -1;
+        }
 
         // ---- Strategic target assignment ----
 

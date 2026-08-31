@@ -233,6 +233,25 @@ namespace UEBS2PathingMod
                 GUILayout.Label($"  Block strength: {i.FlowFieldBlockStrength.Value:F2}  (0=none, 1=hard wall)");
                 i.FlowFieldBlockStrength.Value = GUILayout.HorizontalSlider(i.FlowFieldBlockStrength.Value, 0f, 1f);
 
+                // ---- Battle Momentum / Ebb & Flow ----
+                GUILayout.Space(4);
+                GUILayout.Label("Battle Momentum (Ebb & Flow)", _header);
+                i.MomentumEnabled.Value = GUILayout.Toggle(i.MomentumEnabled.Value,
+                    "  Enable wave-phase momentum (surge → pause → counter-push)");
+                if (i.MomentumEnabled.Value)
+                {
+                    GUILayout.Label($"  Exhaustion rate: {i.MomentumExhaustionRate.Value:F3}  (momentum drain while fighting)");
+                    i.MomentumExhaustionRate.Value = GUILayout.HorizontalSlider(i.MomentumExhaustionRate.Value, 0.01f, 0.2f);
+                    GUILayout.Label($"  Recovery rate: {i.MomentumRecoveryRate.Value:F3}  (momentum regain while pausing)");
+                    i.MomentumRecoveryRate.Value = GUILayout.HorizontalSlider(i.MomentumRecoveryRate.Value, 0.01f, 0.15f);
+                    GUILayout.Label($"  Surge threshold: {i.MomentumSurgeThreshold.Value:F2}  (momentum to trigger next push)");
+                    i.MomentumSurgeThreshold.Value = GUILayout.HorizontalSlider(i.MomentumSurgeThreshold.Value, 0.4f, 0.9f);
+                    GUILayout.Label($"  Consolidate threshold: {i.MomentumConsolidateThreshold.Value:F2}  (momentum to trigger pause)");
+                    i.MomentumConsolidateThreshold.Value = GUILayout.HorizontalSlider(i.MomentumConsolidateThreshold.Value, 0.05f, 0.4f);
+                    i.MomentumWavePooling.Value = GUILayout.Toggle(i.MomentumWavePooling.Value,
+                        "  Wave-based target pooling (fresh groups get GPU priority)");
+                }
+
                 GUILayout.Space(6);
                 GUILayout.Label("UI", _header);
                 i.ShowDebugStats.Value = GUILayout.Toggle(i.ShowDebugStats.Value, "  Show debug stats");
@@ -291,6 +310,28 @@ namespace UEBS2PathingMod
                             {
                                 var fort = forts[f];
                                 GUILayout.Label($"    T{fort.DefendingTeam} {fort.DefenderCount}def r{fort.Radius:F0} {(fort.HasStructures ? "WALLS" : "open")}", _small);
+                            }
+                        }
+
+                        // Momentum / ebb-and-flow stats
+                        if (BattleMomentum.Enabled)
+                        {
+                            GUILayout.Space(2);
+                            GUILayout.Label("  Momentum (ebb & flow):", _small);
+                            var momStats = BattleMomentum.GetStats();
+                            for (int m = 0; m < momStats.Count && m < 10; m++)
+                            {
+                                var ms = momStats[m];
+                                // Color-code phase: cyan=surge, yellow=engaged, orange=consolidate, green=recovering, white=ready
+                                string phaseColor = ms.Phase == BattleMomentum.WavePhase.Surge ? "cyan"
+                                    : ms.Phase == BattleMomentum.WavePhase.Engaged ? "yellow"
+                                    : ms.Phase == BattleMomentum.WavePhase.Consolidate ? "orange"
+                                    : ms.Phase == BattleMomentum.WavePhase.Recovering ? "green"
+                                    : "white";
+                                // Momentum bar: visualize 0..1 as a simple text bar
+                                int barLen = Mathf.RoundToInt(ms.Momentum * 10);
+                                string bar = new string('=', barLen) + new string('-', 10 - barLen);
+                                GUILayout.Label($"    T{ms.Team} [{bar}] {ms.Momentum:F2} <color={phaseColor}>{ms.Phase}</color> {ms.PhaseTime:F1}s pri{ms.PoolPriority}", _small);
                             }
                         }
                     }
