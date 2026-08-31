@@ -226,13 +226,26 @@ namespace UEBS2PathingMod
                             if (st.Outnumbered) flags += "OUT ";
                             if (st.Flanked) flags += "FLK ";
                             if (st.Ranged) flags += "RNG ";
-                            if (st.Holding) flags += "HLD ";
+                            if (st.Holding) flags += "GRD ";
                             if (st.HasCover) flags += "COV ";
                             flags += $"h{st.HeightAdv:+0.0;-0.0;0}m";
                             // Color-code morale: green >0.6, yellow 0.35-0.6, red <0.35
                             string moraleColor = st.Morale > 0.6f ? "green"
                                 : st.Morale > 0.35f ? "yellow" : "red";
                             GUILayout.Label($"    T{st.Team} {st.ArmyCount}arm {st.Remaining}alive hp{st.HealthRatio:F2} <color={moraleColor}>M{st.Morale:F2}</color> {st.Action} [{flags}]", _small);
+                        }
+
+                        // Fortification stats
+                        var forts = FortificationAnalysis.GetFortifications();
+                        if (forts != null && forts.Count > 0)
+                        {
+                            GUILayout.Space(2);
+                            GUILayout.Label("  Fortifications:", _small);
+                            for (int f = 0; f < forts.Count && f < 6; f++)
+                            {
+                                var fort = forts[f];
+                                GUILayout.Label($"    T{fort.DefendingTeam} {fort.DefenderCount}def r{fort.Radius:F0} {(fort.HasStructures ? "WALLS" : "open")}", _small);
+                            }
                         }
                     }
                 }

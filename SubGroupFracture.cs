@@ -88,15 +88,16 @@ namespace UEBS2PathingMod
         /// <summary>What a sub-group has decided to do this cycle.</summary>
         public enum FractureAction
         {
-            None,           // follow player order as-is
-            Reinforce,      // move toward a losing friendly sub-group
-            Retreat,        // fall back toward friendly forces
-            Pursue,         // chase a retreating enemy
-            Reposition,     // reposition to avoid encirclement
-            SeekHighGround, // move to nearby high ground for advantage
-            SeekCover,      // move to nearby cover (ranged units under fire)
-            Rout,           // full panic retreat — morale has collapsed
-            Regroup,        // rallying point for routed units to reform
+            None,               // follow player order as-is
+            Reinforce,          // move toward a losing friendly sub-group
+            Retreat,            // fall back toward friendly forces
+            Pursue,             // chase a retreating enemy
+            Reposition,         // reposition to avoid encirclement
+            SeekHighGround,     // move to nearby high ground for advantage
+            SeekCover,          // move to nearby cover (ranged units under fire)
+            Rout,               // full panic retreat — morale has collapsed
+            Regroup,            // rallying point for routed units to reform
+            FlankFortification, // approach enemy fortification from a distributed side
         }
 
         /// <summary>Called from the NavGrid.Update prefix each frame.</summary>
@@ -154,6 +155,10 @@ namespace UEBS2PathingMod
 
             if (_subGroups.Count == 0) return;
 
+            // 1b. Detect fortifications (HoldGuard armies, structures).
+            // Done before assessment so morale can include fort bonuses.
+            FortificationAnalysis.DetectFortifications(null);
+
             // 2. Assess each sub-group's tactical situation.
             for (int i = 0; i < _subGroups.Count; i++)
             {
@@ -198,7 +203,10 @@ namespace UEBS2PathingMod
         /// Temporarily override GPU flags for a fracturing army so the compute
         /// shader actually follows our flow-field targets:
         ///   - HoldPosition = false (so flow field is read)
-        ///   - For retreating/routing armies: WalkAttack = false, HoldGuard = false
+        ///   - HoldGuard = false (CRITICAL: the game's RunGpuAi re-sets
+        ///     HoldPosition = true if HoldGuard is true, so we MUST clear
+        ///     HoldGuard for ALL fracturing armies, not just retreating ones)
+        ///   - For retreating/routing armies: also WalkAttack = false
         ///     (so the GPU doesn't seek enemies, letting the flow field pull them away)
         /// Called in the RunGpuAi prefix. Original values are saved for restoration.
         /// </summary>
@@ -207,19 +215,26 @@ namespace UEBS2PathingMod
             int id = army.GetInstanceID();
             bool isRetreating = _retreatingArmyIds.Contains(id);
 
+            // HoldPosition — so the GPU reads the flow field.
             if (!_originalHoldPos.ContainsKey(id))
                 _originalHoldPos[id] = army.HoldPosition;
             army.HoldPosition = false;
 
+            // HoldGuard — MUST be cleared for ALL fracturing armies, because
+            // the game's RunGpuAi does: if (HoldGuard) { HoldPosition = true; }
+            // which would undo our HoldPosition override above.
+            if (!_originalHoldGuard.ContainsKey(id))
+                _originalHoldGuard[id] = army.HoldGuard;
+            army.HoldGuard = false;
+
+            // WalkAttack — only suppress for retreating/routing armies.
+            // For other fractures (reinforce, pursue, flank), we still want
+            // units to attack enemies they encounter en route.
             if (isRetreating)
             {
                 if (!_originalWalkAttack.ContainsKey(id))
                     _originalWalkAttack[id] = army.WalkAttack;
                 army.WalkAttack = false;
-
-                if (!_originalHoldGuard.ContainsKey(id))
-                    _originalHoldGuard[id] = army.HoldGuard;
-                army.HoldGuard = false;
             }
         }
 
@@ -463,6 +478,17 @@ namespace UEBS2PathingMod
             // Ranged units in the open lose morale faster (they're vulnerable).
             if (sg.IsRanged && !sg.Terrain.HasCover && sg.IsEngaged) morale -= 0.1f;
 
+            // Fortification bonus — defenders in forts fight much harder.
+            // Real battles: fortified positions are force multipliers.
+            float fortBonus = FortificationAnalysis.GetFortificationMoraleBonus(sg.Centroid, sg.Team);
+            morale += fortBonus;
+
+            // Attacking a fortification is costly — morale penalty for attackers.
+            if (FortificationAnalysis.IsInEnemyFortification(sg.Centroid, sg.Team))
+            {
+                morale -= 0.15f;
+            }
+
             return Mathf.Clamp01(morale);
         }
 
@@ -560,13 +586,27 @@ namespace UEBS2PathingMod
             // Unengaged groups reinforce losing allies — applies to both
             // attacking and holding armies. A holding group will break to
             // save a nearby ally; an attacking group will divert to help.
+            // BUT: if there's an enemy fortification nearby and we're not
+            // engaged, flank it instead of reinforcing (multi-team sieges).
             else if (BehaviorReinforce && !sg.IsEngaged)
             {
-                var losingAlly = FindLosingAlly(sg);
-                if (losingAlly != null)
+                // Check for nearby enemy fortification to flank.
+                var enemyFort = FortificationAnalysis.GetNearestEnemyFortification(sg.Centroid, sg.Team);
+                if (enemyFort.HasValue && Vector3.Distance(sg.Centroid, enemyFort.Value.Center) < 600f)
                 {
-                    action = FractureAction.Reinforce;
-                    sg.NearestFriendlyCentroid = losingAlly.Centroid;
+                    // Flank the fortification — approach from a distributed side.
+                    action = FractureAction.FlankFortification;
+                    sg.NearestEnemyPos = FortificationAnalysis.GetFlankAttackPoint(
+                        sg.Centroid, enemyFort.Value, sg.GetHashCode());
+                }
+                else
+                {
+                    var losingAlly = FindLosingAlly(sg);
+                    if (losingAlly != null)
+                    {
+                        action = FractureAction.Reinforce;
+                        sg.NearestFriendlyCentroid = losingAlly.Centroid;
+                    }
                 }
             }
 
@@ -716,6 +756,13 @@ namespace UEBS2PathingMod
                     // Rallied units reform at the nearest friendly sub-group.
                     dest = sg.NearestFriendlyCentroid;
                     avoidEnemies = true;
+                    break;
+
+                case FractureAction.FlankFortification:
+                    // Approach the enemy fortification from a distributed flank point.
+                    // NearestEnemyPos was set to the flank point by DecideAndAct.
+                    dest = sg.NearestEnemyPos;
+                    avoidEnemies = false; // attack-move toward the fort
                     break;
 
                 default:
