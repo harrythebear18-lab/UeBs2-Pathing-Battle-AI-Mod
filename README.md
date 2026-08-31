@@ -1,19 +1,31 @@
 # UEBS2 Pathing & Battle AI Mod
 
-A BepInEx mod for **Ultimate Epic Battle Simulator 2** that overhauls pathfinding, team AI, and battle dynamics to make large-scale battles behave more like real warfare.
+A BepInEx mod for **Ultimate Epic Battle Simulator 2** that overhauls pathfinding, team AI, and battle dynamics to make large-scale battles behave more like real warfare. Includes a **two-stage AI battle agent** (Qwen VL vision + Qwen Coder) that watches the battlefield and proposes flow field manipulations in real time.
 
 ## Requirements
 
 - **UEBS2** (Ultimate Epic Battle Simulator 2) on Steam
 - **BepInEx 5.4.21 (Mono)** installed in the game folder
-- .NET Framework 4.7.2+ (included with the game)
+- .NET Framework 4.6.2+ (included with the game)
+- **Optional**: [Ollama](https://ollama.ai) running locally with `qwen2.5vl:7b` (vision) and `qwen2.5-coder:7b` (coder) models for the AI battle agent
 
 ## Installation
 
-1. Install BepInEx 5.4.21 Mono into your UEBS2 game folder (`steamapps/common/UEBS2/`)
+1. Install BepInEx 5.4.21 Mono into your UEBS2 game folder
 2. Copy `UEBS2PathingMod.dll` into `UEBS2/BepInEx/plugins/`
 3. Launch the game — the mod loads automatically
 4. Press **Numpad+** in battle to open the tuning window
+
+### Optional: AI Battle Agent
+
+1. Install [Ollama](https://ollama.ai) locally
+2. Pull the models:
+   ```
+   ollama pull qwen2.5vl:7b
+   ollama pull qwen2.5-coder:7b
+   ```
+3. Ensure Ollama is running (`ollama serve` or the desktop app)
+4. In the mod's UI (Numpad+), enable "AI Battle Agent" and configure models/interval
 
 ## Features
 
@@ -105,7 +117,7 @@ When a sub-group fractures, the mod temporarily overrides GPU compute flags on i
 
 - `HoldPosition = false` — so the GPU reads the flow field instead of freezing units
 - `WalkAttack = false` (for retreating/routing) — so the GPU stops seeking enemies
-- `HoldGuard = false` (for retreating/routing) — so guard range doesn't trap units
+- `HoldGuard = false` (for all fracturing armies) — so guard range doesn't trap units
 
 Original values are restored after each GPU dispatch, preserving the player's orders.
 
@@ -120,16 +132,106 @@ The mod uses the active Unity terrain and physics raycasts to evaluate the battl
 
 Terrain analysis is automatically disabled for battles with 100k+ units to save CPU (height advantage still works via a single cheap sample).
 
-### 6. Dispersion System
+### 6. Fortification Analysis
 
-Instead of units clumping into tight columns following a single flow-field line, the mod spreads them across a wider front:
+Detects and analyzes fortified positions on the battlefield:
 
-- **Wider formation length** — boosts the GPU's `FormationLength` parameter by up to 4x
-- **Multiple offset targets** — up to 5 targets placed perpendicular to the movement direction, creating a broad attractor basin in the flow field
+- Identifies defensive clusters (armies with `HoldGuard` + structures/walls)
+- Calculates fortification radius, defender count, and structural integrity
+- Provides **morale bonuses** to defenders (+0.2) and **penalties** to attackers (−0.15)
+- Guides attacking sub-groups to **distributed flank points** instead of frontal assaults
+- Multiple attacking teams coordinate to hit different flanks simultaneously
+
+### 7. Dispersion System (Braided Wide Front)
+
+Instead of units clumping into tight columns or parallel lateral lines, the mod creates a **wide front with braided mixing**:
+
+- **Single wide target** with boosted `FormationLength` (up to 4x) — creates a broad attractor basin, not parallel channels
+- **Braided zigzag obstacles** — alternating diagonal soft blockers along the march path that force the flow field to weave, causing units to shift laterally as they advance
 - Scales with unit count — larger armies form proportionally wider fronts
-- Configurable dispersion factor (0 = vanilla tight columns, 1 = very wide front) and max spread width
+- Configurable dispersion factor (0 = vanilla tight columns, 1 = very wide braided front) and max spread width
 
-### 7. Cinematic Camera Improvement
+The braided obstacles are soft (strength ~0.3 × dispersion) — they redirect rather than block, so units still advance but weave side to side. The result is a wide front that mixes as it moves, like a real marching body.
+
+### 8. Flow Field Modulation
+
+The mod injects **soft obstacles** into the game's GPU `ObstacleGrid` (an R8 RenderTexture) before each compute dispatch, then restores the original grid afterward. This enables:
+
+- **Block direct paths** — place walls between two points to force routing around
+- **Create corridors** — two parallel walls that funnel units through a specific path
+- **Retreat wavefields** — wall off the forward path toward the enemy, funnel units into a clean retreat corridor, and braid the rear path so retreating units mix backward instead of clumping
+- **Fortification approach blocking** — block all direct approaches to a fort except the assigned flank
+- **Braided mixing** — zigzag obstacles along advance paths for organic formation weaving
+
+Retreat wavefields are integrated into the fracture system with escalating strength:
+- **Retreat** (0.7) — tactical fallback with strong push-back
+- **Rout** (0.9) — panic, hard forward wall prevents re-engagement
+- **Regroup** (0.4) — light wall, shaky units reform without re-engaging prematurely
+
+### 9. AI Battle Agent (Ollama)
+
+A **two-stage AI pipeline** that watches the battlefield and proposes flow field manipulations:
+
+```
+Screenshot → Qwen 2.5 VL (eyes) → tactical assessment
+                                        ↓
+Battle state JSON ──────────→ Qwen 2.5 Coder (actor) → proposed commands
+                                        ↓
+                                 UI: approve / reject
+                                        ↓
+                           FlowFieldModulator executes
+```
+
+#### Stage 1: Eyes (Qwen 2.5 VL)
+
+Captures a screenshot (downscaled to 640px), sends it to the Qwen 2.5 VL vision model, and receives a tactical assessment:
+- Which side is winning or losing
+- Formation quality (tight columns, spread lines, clumping, gaps)
+- Flank threats or encirclement attempts
+- Terrain features affecting the battle
+- Units retreating, routing, or breaking formation
+
+#### Stage 2: Engineer/Actor (Qwen 2.5 Coder)
+
+Receives the vision assessment + structured battle state JSON and proposes a set of flow field commands:
+
+| Command | Description |
+|---------|-------------|
+| `block_path` | Place a wall between two points to block direct movement |
+| `corridor` | Create a corridor (two parallel walls) to funnel units |
+| `retreat_wave` | Create a retreat wavefield that pushes a unit group backward |
+| `set_param` | Adjust a mod parameter (dispersion, block strength, retreat/rout thresholds, aggression) |
+
+The coder receives real world coordinates from the battle state:
+```json
+{
+  "total_units": 15000,
+  "current_params": {"dispersion": 0.5, "block_strength": 0.7, ...},
+  "teams": [{"team": 0, "units": 8000, "centroid": [120, 0, 340]}, ...],
+  "subgroups": [{"team": 0, "units": 3000, "morale": 0.3, "action": "Retreat", ...}],
+  "fortifications": [{"team": 1, "center": [200, 0, 100], "radius": 80}]
+}
+```
+
+#### Approval Workflow
+
+By default, proposed commands are shown in the UI for **player approval** before execution:
+- Agent state display (idle / capturing / vision analyzing / coder analyzing / awaiting approval)
+- Vision assessment text
+- Coder reasoning
+- Numbered command list with human-readable descriptions
+- **APPROVE** / **REJECT** buttons
+
+An auto-apply mode is available (defaults off) for fully autonomous operation.
+
+#### Controls
+
+- **Numpad8** — trigger an immediate analysis cycle
+- Configurable: vision model, coder model, interval (5–60s), auto-apply toggle
+
+Both LLM calls run on **background threads** — the game never stutters during analysis.
+
+### 10. Cinematic Camera Improvement
 
 Replaces the vanilla auto-cinematic camera's random target selection with **combat-weighted selection**:
 
@@ -137,6 +239,16 @@ Replaces the vanilla auto-cinematic camera's random target selection with **comb
 - Weighted-random pick blends combat score with uniform coverage based on bias strength
 - `BiasStrength = 0` → fully random (vanilla), `1.0` → always the hottest clash
 - Configurable focus interval (time between camera cuts)
+
+### 11. Paint Mode (Numpad9)
+
+A separate battlefield paint mode for real-time flow field manipulation that coexists with the RTS camera:
+
+- **Left-click** — place soft obstacle blockers at the mouse position
+- **Right-click** — remove blockers
+- **Corridor tool** — two-point wall placement to create unit channels
+- **Brush size/strength** — adjustable controls
+- Does not capture the mouse — you can paint and control the camera simultaneously
 
 ## UI Window (Numpad+)
 
@@ -147,9 +259,20 @@ An in-game IMGUI window with live tuning for all features:
 - **NavGrid** — adaptive tuning, max active targets, obstacle update speed
 - **Cinematic Camera** — combat bias toggle, bias strength, focus interval
 - **Sub-Group Fracture** — enable, cluster radius, reassess interval, individual behavior toggles, morale thresholds, aggression boost, dispersion controls
-- **Live stats** — team priorities, active targets, sub-group states with color-coded morale, engagement flags, terrain info
+- **Flow Field Modulation** — enable, block strength slider
+- **AI Battle Agent** — enable, interval, vision/coder model selection, auto-apply toggle, live agent state, vision assessment, coder reasoning, proposed commands with approve/reject
+- **Live stats** — team priorities, active targets, sub-group states with color-coded morale, engagement flags, terrain info, fortification data
 
 The window captures the mouse cursor and suppresses camera mouse-look while open, so you can interact with sliders and toggles freely. Press **Numpad+** or **Escape** to close and return control to the game.
+
+## Hotkeys
+
+| Key | Action |
+|-----|--------|
+| **Numpad+** | Toggle settings window |
+| **Numpad8** | Trigger AI battle analysis (manual) |
+| **Numpad9** | Toggle paint mode |
+| **Escape** | Close settings window |
 
 ## Configuration
 
@@ -162,6 +285,8 @@ All settings are also available as BepInEx config entries (`BepInEx/config/UEBS2
 - Terrain cover/high-ground search is skipped for 100k+ unit battles
 - GPU flow-field targets are injected via the game's existing `NavGrid.AddTarget` API — no GPU buffer manipulation
 - Extra `FullSearch` dispatches for mod targets are scaled by aggressiveness to avoid GPU overload
+- Flow field modulation uses `Graphics.Blit` with additive blending — one render pass per frame, restored immediately after
+- AI battle agent runs all LLM calls on background threads — zero game-thread impact
 
 ## Technical Details
 
@@ -169,6 +294,8 @@ All settings are also available as BepInEx config entries (`BepInEx/config/UEBS2
 - **Mod loader**: BepInEx 5.4.21 Mono
 - **Patching**: HarmonyX via BepInEx
 - **Pathfinding**: GPU-based flow fields via `NavGpu` compute shader — the mod injects targets and tunes parameters but does not modify the compute shader itself
+- **Flow field modulation**: Soft obstacles rendered into `ObstacleGrid` (R8 RenderTexture) via `GL.Begin(GL.QUADS)` + additive `Graphics.Blit`, backed up and restored each frame
+- **AI agent**: HTTP requests to Ollama REST API (`localhost:11434`), dependency-free JSON parsing (no Newtonsoft.Json required)
 - **Safe patches**: All patches use Prefix/Postfix hooks on existing Update loops. Every patch is wrapped in try/catch to prevent mod errors from crashing the game's nav loop.
 
 ## Building from Source
@@ -180,3 +307,19 @@ dotnet build -c Release
 Output: `bin/Release/UEBS2PathingMod.dll`
 
 The `.csproj` expects BepInEx and game assemblies in the UEBS2 managed folder. Adjust `GameDir` in the `.csproj` if your install path differs.
+
+## Source Files
+
+| File | Purpose |
+|------|---------|
+| `PathingModPlugin.cs` | BepInEx plugin entry, config bindings, Harmony patches, strategic target assignment, smart scheduling |
+| `SubGroupFracture.cs` | Sub-group clustering, tactical assessment, morale, autonomous behaviors, dispersion/braiding, retreat wavefield integration |
+| `FlowFieldModulator.cs` | Soft obstacle injection into GPU ObstacleGrid: blockers, corridors, retreat wavefields, fortification blocking, braided mixing |
+| `FortificationAnalysis.cs` | Fortification detection, morale bonuses/penalties, flank point calculation |
+| `TerrainAnalysis.cs` | Height advantage, cover detection, high ground/cover search |
+| `CinematicPatches.cs` | Combat-weighted cinematic camera target selection |
+| `BattleAgent.cs` | Two-stage AI pipeline: Qwen VL vision + Qwen Coder command proposal with approval workflow |
+| `OllamaClient.cs` | Dependency-free HTTP client for Ollama REST API |
+| `BattleAnalyzer.cs` | Legacy single-stage analyzer (superseded by BattleAgent) |
+| `PathingModUI.cs` | In-game tuning window with all settings + AI agent command approval |
+| `PaintModeUI.cs` | Battlefield paint mode for real-time flow field manipulation |
